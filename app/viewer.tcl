@@ -1,5 +1,5 @@
 #!/usr/bin/env tclsh
-# viewer.tcl  --  PDF-Viewer auf Basis von pdfiumtcl — Version 0.3
+# viewer.tcl  --  PDF-Viewer auf Basis von pdfiumtcl \u2014 Version 0.4
 #
 # Aufruf:  tclsh viewer.tcl datei.pdf
 
@@ -26,15 +26,15 @@ wm minsize . 600 400
 
 # Toolbar
 frame .tb -relief raised -bd 1
-button .tb.open  -text "Öffnen"   -command cmd_open
-button .tb.prev  -text "◀"         -command cmd_prev
-button .tb.next  -text "▶"         -command cmd_next
+button .tb.open  -text "\u00d6ffnen"   -command cmd_open
+button .tb.prev  -text "\u25c0"         -command cmd_prev
+button .tb.next  -text "\u25b6"         -command cmd_next
 label  .tb.info  -textvariable state(pageinfo) -width 16
 label  .tb.dpi_l -text "DPI:"
 spinbox .tb.dpi  -from 72 -to 600 -increment 50 \
                  -textvariable state(dpi) -width 5 \
                  -command cmd_refresh
-button .tb.panel -text "Info ▶◀"  -command cmd_toggle_panel
+button .tb.panel -text "Info \u25b6\u25c0"  -command cmd_toggle_panel
 button .tb.text  -text "Text"     -command cmd_showtext
 button .tb.print -text "Drucken"  -command cmd_print
 button .tb.ql    -text "QL"       -command cmd_print_ql
@@ -149,14 +149,67 @@ bind . <Right> cmd_next
 bind . <Prior> cmd_prev
 bind . <Next>  cmd_next
 
-# Mausrad
-bind .pw.left.c <Control-MouseWheel> {
-    if {%D > 0} { cmd_zoom_in  } else { cmd_zoom_out }
+# Mausrad -- Linux/X11 (Button-4/5) + Windows/macOS/Touchpad (MouseWheel)
+bind all <Button-4> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        .pw.left.c yview scroll -3 units
+    }
 }
-bind .pw.left.c <Control-Button-4> { cmd_zoom_in  }
-bind .pw.left.c <Control-Button-5> { cmd_zoom_out }
-bind .pw.left.c <Button-4> { .pw.left.c yview scroll -3 units }
-bind .pw.left.c <Button-5> { .pw.left.c yview scroll  3 units }
+bind all <Button-5> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        .pw.left.c yview scroll 3 units
+    }
+}
+bind all <MouseWheel> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        .pw.left.c yview scroll [expr {-(%D/120)*3}] units
+    }
+}
+bind all <Control-Button-4> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        cmd_zoom_in
+    }
+}
+bind all <Control-Button-5> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        cmd_zoom_out
+    }
+}
+bind all <Control-MouseWheel> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        if {%D > 0} { cmd_zoom_in } else { cmd_zoom_out }
+    }
+}
+bind all <Shift-Button-4> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        .pw.left.c xview scroll -3 units
+    }
+}
+bind all <Shift-Button-5> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        .pw.left.c xview scroll 3 units
+    }
+}
+bind all <Shift-MouseWheel> {
+    set w [winfo containing %X %Y]
+    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
+        .pw.left.c xview scroll [expr {-(%D/120)*3}] units
+    }
+}
+
+# Mittlere Maustaste: Drag-Scroll
+bind .pw.left.c <Button-2>  { .pw.left.c scan mark   %x %y }
+bind .pw.left.c <B2-Motion> { .pw.left.c scan dragto %x %y 1 }
+
+bind .pw.left.c <Enter> { focus .pw.left.c }
 
 # ------------------------------------------------------------------ #
 # Befehle                                                             #
@@ -164,7 +217,7 @@ bind .pw.left.c <Button-5> { .pw.left.c yview scroll  3 units }
 proc cmd_open {} {
     global state
     set f [tk_getOpenFile \
-        -title "PDF öffnen" \
+        -title "PDF \u00f6ffnen" \
         -filetypes {{"PDF-Dokumente" .pdf} {"Alle Dateien" *}}]
     if {$f eq ""} return
     open_pdf $f
@@ -178,7 +231,7 @@ proc ask_password {filename} {
     wm resizable $w 0 0
     wm transient $w .
 
-    label  $w.l -text "Passwort für [file tail $filename]:"
+    label  $w.l -text "Passwort f\u00fcr [file tail $filename]:"
     entry  $w.e -show * -width 30
     frame  $w.f
     button $w.f.ok     -text "OK"        -default active \
@@ -222,7 +275,7 @@ proc open_pdf {filename {password ""}} {
     set state(file)  $filename
     set state(total) [pdfium::pagecount $doc]
     set state(page)  0
-    wm title . "PDF Viewer – [file tail $filename]"
+    wm title . "PDF Viewer \u2013 [file tail $filename]"
     update_info_panel
     show_page
 }
@@ -318,7 +371,7 @@ proc show_page {} {
     set n $state(total)
     set state(pageinfo) "Seite [expr {$p+1}] / $n"
 
-    # Rendern: Bild heißt immer "pdfpage"
+    # Rendern: Bild hei\u00dft immer "pdfpage"
     if {[catch {
         pdfium::render $state(doc) $p \
             -dpi $state(dpi) -imagename pdfpage
@@ -368,7 +421,7 @@ proc cmd_showtext {} {
     set w .textwin
     if {[winfo exists $w]} { destroy $w }
     toplevel $w
-    wm title $w "Text – Seite [expr {$state(page)+1}]"
+    wm title $w "Text \u2013 Seite [expr {$state(page)+1}]"
 
     text $w.t -wrap word -width 80 -height 30 \
         -yscrollcommand "$w.sb set"
@@ -384,7 +437,7 @@ proc cmd_showtext {} {
 # Drucken                                                             #
 # ------------------------------------------------------------------ #
 
-# Verfügbare Drucker per lpstat ermitteln
+# Verf\u00fcgbare Drucker per lpstat ermitteln
 proc get_printers {} {
     if {[catch {exec lpstat -a} out]} {
         return [list]
@@ -443,7 +496,7 @@ proc cmd_print {} {
     grid $w.f.rl $w.f.rf -sticky w -pady 3
 
     # DPI
-    label $w.f.dl -text "Druckqualität (DPI):" -anchor w
+    label $w.f.dl -text "Druckqualit\u00e4t (DPI):" -anchor w
     frame $w.f.df
     foreach d {150 300 600} {
         radiobutton $w.f.df.$d -text "${d} DPI" \
@@ -497,7 +550,7 @@ proc do_print {printer range dpi copies} {
     set w .progwin
     if {[winfo exists $w]} { destroy $w }
     toplevel $w
-    wm title $w "Drucken läuft..."
+    wm title $w "Drucken l\u00e4uft..."
     wm transient $w .
     label $w.l -text "Bereite Druck vor..." -padx 20 -pady 10
     pack  $w.l
@@ -513,7 +566,7 @@ proc do_print {printer range dpi copies} {
 
         set tmpfile [file join /tmp "pdfprint_p${p}_[pid].png"]
 
-        # Seite mit Druckauflösung rendern
+        # Seite mit Druckaufl\u00f6sung rendern
         if {[catch {
             pdfium::render $state(doc) $p \
                 -dpi $dpi -imagename printpage
@@ -547,7 +600,7 @@ proc do_print {printer range dpi copies} {
         }
     }
 
-    # Temporäre Dateien aufräumen
+    # Tempor\u00e4re Dateien aufr\u00e4umen
     foreach f $tmpfiles {
         catch { file delete $f }
     }
@@ -556,7 +609,7 @@ proc do_print {printer range dpi copies} {
 }
 
 # ------------------------------------------------------------------ #
-# Brother QL Druck — Version 0.2                                      #
+# Brother QL Druck \u2014 Version 0.2                                      #
 # Korrekte Pixelbreiten laut brother_ql / labelutil:                 #
 #   54mm -> 590 px, 62mm -> 696 px etc.                              #
 # ------------------------------------------------------------------ #
@@ -581,7 +634,7 @@ proc cmd_print_ql {} {
     wm resizable $w 0 0
     wm transient $w .
 
-    # Seitengröße der aktuellen PDF-Seite
+    # Seitengr\u00f6\u00dfe der aktuellen PDF-Seite
     set sz  [pdfium::pagesize $state(doc) $state(page)]
     set pdf_wmm [format "%.1f" [lindex $sz 0]]
     set pdf_hmm [format "%.1f" [lindex $sz 1]]
@@ -609,13 +662,13 @@ proc cmd_print_ql {} {
     frame $w.f -padx 12 -pady 8
     pack  $w.f -fill both
 
-    # Info: PDF-Seitengröße
+    # Info: PDF-Seitengr\u00f6\u00dfe
     label $w.f.info \
-        -text "PDF-Seite: ${pdf_wmm} × ${pdf_hmm} mm" \
+        -text "PDF-Seite: ${pdf_wmm} \u00d7 ${pdf_hmm} mm" \
         -foreground navy -font {TkDefaultFont 9 bold}
     grid $w.f.info - -sticky w -pady 4
 
-    # Drucker — alle verfügbaren
+    # Drucker \u2014 alle verf\u00fcgbaren
     label $w.f.pl -text "Drucker:" -anchor w
     ttk::combobox $w.f.pc \
         -textvariable ::_ql_printer \
@@ -640,8 +693,8 @@ proc cmd_print_ql {} {
     }
     grid $w.f.bl $w.f.bf -sticky nw -pady 3
 
-    # Auflösung
-    label $w.f.dl -text "Auflösung:" -anchor w
+    # Aufl\u00f6sung
+    label $w.f.dl -text "Aufl\u00f6sung:" -anchor w
     frame $w.f.df
     radiobutton $w.f.df.r300 -text "300 DPI" \
         -variable ::_ql_dpi -value 300 -command update_ql_info
@@ -660,7 +713,7 @@ proc cmd_print_ql {} {
     pack $w.f.cf.rend $w.f.cf.rnone -side left -padx 4
     grid $w.f.cl $w.f.cf -sticky w -pady 3
 
-    # Ausgabegröße (berechnet)
+    # Ausgabegr\u00f6\u00dfe (berechnet)
     label $w.f.sl   -text "Ausgabe:" -anchor w
     label $w.f.sval -textvariable ::_ql_sizeinfo -anchor w -foreground darkgreen
     grid $w.f.sl $w.f.sval -sticky w -pady 3
@@ -688,7 +741,7 @@ proc cmd_print_ql {} {
     bind $w <Return> "$w.bf.ok invoke"
     bind $w <Escape> "$w.bf.can invoke"
 
-    # Ausgabegröße berechnen
+    # Ausgabegr\u00f6\u00dfe berechnen
     proc update_ql_info {} {
         global state
         set sz   [pdfium::pagesize $state(doc) $state(page)]
@@ -701,7 +754,7 @@ proc cmd_print_ql {} {
         set h_px [expr {int($hmm / $wmm * $w_px + 0.5)}]
         set h_mm [format "%.1f" $hmm]
         set ::_ql_sizeinfo \
-            "${band} × ${h_mm} mm  (${w_px} × ${h_px} px, ${dpi} DPI)"
+            "${band} \u00d7 ${h_mm} mm  (${w_px} \u00d7 ${h_px} px, ${dpi} DPI)"
     }
     update_ql_info
 
@@ -717,7 +770,7 @@ proc cmd_print_ql {} {
 proc do_print_ql {printer band dpi range cut} {
     global state
 
-    # Pixelbreite für gewähltes Band
+    # Pixelbreite f\u00fcr gew\u00e4hltes Band
     set w_px [ql_width_px $band]
     if {$dpi == 600} { set w_px [expr {$w_px * 2}] }
 
@@ -735,7 +788,7 @@ proc do_print_ql {printer band dpi range cut} {
     set pw .qlprog
     if {[winfo exists $pw]} { destroy $pw }
     toplevel $pw
-    wm title $pw "QL Druck läuft..."
+    wm title $pw "QL Druck l\u00e4uft..."
     wm transient $pw .
     label $pw.l -text "Vorbereitung..." -padx 20 -pady 10
     pack  $pw.l
@@ -746,7 +799,7 @@ proc do_print_ql {printer band dpi range cut} {
 
     foreach p $pages {
         $pw.l configure -text \
-            "Rendere Seite [expr {$p+1}] — ${band}mm, ${w_px}px, ${dpi}DPI..."
+            "Rendere Seite [expr {$p+1}] \u2014 ${band}mm, ${w_px}px, ${dpi}DPI..."
         update
 
         set tmpfile [file join /tmp "ql_p${p}_[pid].png"]
@@ -762,7 +815,7 @@ proc do_print_ql {printer band dpi range cut} {
             break
         }
 
-        # Höhe in mm aus tatsächlicher PNG-Höhe berechnen
+        # H\u00f6he in mm aus tats\u00e4chlicher PNG-H\u00f6he berechnen
         set ih [image height qlpage]
         set h_mm [format "%.1f" [expr {$ih / 300.0 * 25.4}]]
         lappend tmpfiles [list $tmpfile $h_mm]
@@ -774,7 +827,7 @@ proc do_print_ql {printer band dpi range cut} {
             set hmm [lindex $entry 1]
 
             $pw.l configure -text \
-                "Sende an $printer  (${band} × ${hmm} mm)..."
+                "Sende an $printer  (${band} \u00d7 ${hmm} mm)..."
             update
 
             set cmd [list lp -d $printer \

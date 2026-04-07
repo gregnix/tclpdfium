@@ -1,1 +1,21 @@
-**nogit/
+# Build-Ausgaben
+*.so
+*.dll
+*.dll.lib
+
+# Windows-Distribution
+dist-win/
+
+# Cross-Compile: extrahierte MinGW-Pakete
+mingw64/
+windows/
+
+# PDFium-Binaries (via setup.sh heruntergeladen)
+vendor/pdfium/bin/
+vendor/pdfium/lib/libpdfium.so
+vendor/pdfium/lib/pdfium.dll
+vendor/pdfium/lib/pdfium.dll.lib
+vendor/pdfium/lib/libpdfium.dylib
+
+# Nicht-öffentliche Dateien
+nogit/

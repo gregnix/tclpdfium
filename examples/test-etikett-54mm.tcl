@@ -96,7 +96,7 @@ $pdf text "pdf4tcl + pdfiumtcl  |  54mm QL-820 Test" \
 
 $pdf endPage
 
-set outfile "test-etikett.pdf"
+set outfile "etikett54.pdf"
 $pdf write -file $outfile
 $pdf destroy
 
@@ -108,11 +108,11 @@ package require pdfiumtcl
 
 set doc [pdfium::open $outfile]
 pdfium::render $doc 0 -width 590 -imagename qlpage
-qlpage write img/etikett.png -format png
+qlpage write img/etikett54.png -format png
 pdfium::close $doc
 
 set iw [image width  qlpage]
 set ih [image height qlpage]
-set h_mm_real [format "%.1f" [expr {$ih / 300.0 * 25.4}]]
+# Hoehe direkt aus PDF -- nicht per DPI-Rueckrechnung (Rundungsfehler)
 
-puts "PNG: img/etikett.png  ${iw} x ${ih} px  (54 x ${h_mm_real} mm)"
+puts "PNG: img/etikett54.png  ${iw} x ${ih} px  (54 x ${H_mm} mm)"

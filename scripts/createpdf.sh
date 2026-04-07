@@ -8,7 +8,7 @@
 
 HOEHE=${1:-56}
 PRINTER="Brother_QL-820NWB_IPP"
-PNG="img/etikett.png"
+PNG="img/etikett54.png"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 

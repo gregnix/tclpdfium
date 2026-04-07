@@ -32,11 +32,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Tcl_Size: ab Tcl 9 definiert, fuer Tcl 8 als int */
+#ifndef TCL_SIZE_MAX
+    typedef int Tcl_Size;
+#endif
+
+/* Windows DLL-Export — noetig fuer MinGW ohne --export-all-symbols */
+#ifdef _WIN32
+#  define PDFIUMTCL_EXPORT __declspec(dllexport)
+#else
+#  define PDFIUMTCL_EXPORT
+#endif
+
 /* ------------------------------------------------------------------ */
 /* Hilfsmakro: Fehler setzen und TCL_ERROR zurückgeben                 */
 /* ------------------------------------------------------------------ */
 #define PDFIUM_ERROR(interp, msg) \
-    do { Tcl_SetResult(interp, (char*)(msg), TCL_STATIC); return TCL_ERROR; } while(0)
+    do { Tcl_SetObjResult(interp, \
+         Tcl_NewStringObj((msg), -1)); return TCL_ERROR; } while(0)
 
 /* ------------------------------------------------------------------ */
 /* pdfium::open filename ?password?                                    */
@@ -173,8 +186,8 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
         h_px = (int)(h_pt / 72.0 * dpi + 0.5);
     }
 
-    /* PDFium-Bitmap anlegen (BGRA) */
-    FPDF_BITMAP bmp = FPDFBitmap_Create(w_px, h_px, 0 /*kBGR*/);
+    /* PDFium-Bitmap anlegen (BGRA, hasAlpha=1) */
+    FPDF_BITMAP bmp = FPDFBitmap_Create(w_px, h_px, 1 /*hasAlpha=BGRA*/);
     if (!bmp) {
         FPDF_ClosePage(page);
         PDFIUM_ERROR(interp, "cannot create bitmap");
@@ -191,17 +204,18 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
     void *buf = FPDFBitmap_GetBuffer(bmp);
     int stride = FPDFBitmap_GetStride(bmp);
 
-    /* BGRA → RGBA umwandeln (Tk erwartet RGBA) */
-    unsigned char *rgba = (unsigned char *)ckalloc(w_px * h_px * 4);
+    /* BGRA -> RGBA umwandeln (Tk erwartet RGBA) */
+    size_t rgba_size = (size_t)w_px * h_px * 4;
+    unsigned char *rgba = (unsigned char *)ckalloc(rgba_size);
     unsigned char *src  = (unsigned char *)buf;
     for (int y = 0; y < h_px; y++) {
         unsigned char *row = src + y * stride;
-        unsigned char *dst = rgba + y * w_px * 4;
+        unsigned char *dst = rgba + (size_t)y * w_px * 4;
         for (int x = 0; x < w_px; x++) {
             dst[0] = row[2]; /* R */
             dst[1] = row[1]; /* G */
             dst[2] = row[0]; /* B */
-            dst[3] = row[3]; /* A */
+            dst[3] = 255;    /* A: voll opak */
             row += 4;
             dst += 4;
         }
@@ -444,7 +458,7 @@ PdfiumSearchCmd(ClientData cd, Tcl_Interp *interp,
     /* Suchbegriff als UTF-16LE */
     const char *term_utf8 = Tcl_GetString(objv[3]);
     Tcl_Obj *termObj = Tcl_NewStringObj(term_utf8, -1);
-    int termlen;
+    Tcl_Size termlen;
     Tcl_UniChar *termUni = Tcl_GetUnicodeFromObj(termObj, &termlen);
 
     FPDF_DOCUMENT  doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
@@ -538,13 +552,32 @@ CollectBookmarks(FPDF_DOCUMENT doc, FPDF_BOOKMARK bm,
                  int level, Tcl_Interp *interp, Tcl_Obj *result)
 {
     while (bm) {
-        /* Titel */
+        /* Titel als UTF-16LE holen */
         unsigned long len = FPDFBookmark_GetTitle(bm, NULL, 0);
         unsigned short *buf = (unsigned short *)ckalloc(len + 2);
         FPDFBookmark_GetTitle(bm, buf, len);
-        int nchars = (int)((len / 2) - 1);
-        if (nchars < 0) nchars = 0;
-        Tcl_Obj *title = Tcl_NewUnicodeObj((Tcl_UniChar *)buf, nchars);
+
+        /* UTF-16LE -> UTF-8 via Tcl Encoding
+         * Tcl 9: "utf-16le"
+         * Tcl 8: "unicode" (entspricht UTF-16LE auf little-endian) */
+        Tcl_DString ds;
+        Tcl_DStringInit(&ds);
+        Tcl_Encoding enc = Tcl_GetEncoding(NULL, "utf-16le");
+        if (!enc) {
+            enc = Tcl_GetEncoding(NULL, "unicode");
+        }
+        if (enc) {
+            Tcl_ExternalToUtfDString(enc, (char *)buf, (int)(len - 2), &ds);
+            Tcl_FreeEncoding(enc);
+        } else {
+            /* Letzter Fallback: direkt als UniChar */
+            int nchars = (int)((len / 2) - 1);
+            if (nchars < 0) nchars = 0;
+            Tcl_UniCharToUtfDString((Tcl_UniChar *)buf, nchars, &ds);
+        }
+        Tcl_Obj *title = Tcl_NewStringObj(Tcl_DStringValue(&ds),
+                                           Tcl_DStringLength(&ds));
+        Tcl_DStringFree(&ds);
         ckfree((char *)buf);
 
         /* Ziel-Seite */
@@ -684,13 +717,182 @@ PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
 }
 
 /* ------------------------------------------------------------------ */
+/* _AnnotUtf16ToObj  --  UTF-16LE Buffer -> Tcl_Obj (Tcl 8 + 9)      */
+/* ------------------------------------------------------------------ */
+static Tcl_Obj *
+_AnnotUtf16ToObj(Tcl_Interp *interp, unsigned short *buf, unsigned long bytelen)
+{
+    Tcl_DString ds;
+    Tcl_DStringInit(&ds);
+    Tcl_Encoding enc = Tcl_GetEncoding(NULL, "utf-16le");
+    if (!enc) enc = Tcl_GetEncoding(NULL, "unicode");
+    if (enc) {
+        Tcl_ExternalToUtfDString(enc, (char *)buf,
+                                 (int)(bytelen > 2 ? bytelen - 2 : 0), &ds);
+        Tcl_FreeEncoding(enc);
+    }
+    Tcl_Obj *obj = Tcl_NewStringObj(Tcl_DStringValue(&ds),
+                                     Tcl_DStringLength(&ds));
+    Tcl_DStringFree(&ds);
+    return obj;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::annot_list doc-handle pagenum                               */
+/* Gibt Liste aller Annotationen einer Seite zurueck:                  */
+/*   {type subtype rect content author date}                           */
+/*                                                                     */
+/* type  = text|highlight|underline|strikeout|squiggly|link|           */
+/*          freetext|line|square|circle|stamp|widget|popup|...         */
+/* rect  = {x1 y1 x2 y2} in Seitenkoordinaten (Punkte)               */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumAnnotListCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+        return TCL_ERROR;
+    }
+
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    int n = FPDFPage_GetAnnotCount(page);
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+
+    for (int i = 0; i < n; i++) {
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, i);
+        if (!annot) continue;
+
+        /* Annotationstyp als String */
+        FPDF_ANNOTATION_SUBTYPE sub = FPDFAnnot_GetSubtype(annot);
+        const char *typstr;
+        switch (sub) {
+            case FPDF_ANNOT_TEXT:       typstr = "text";       break;
+            case FPDF_ANNOT_LINK:       typstr = "link";       break;
+            case FPDF_ANNOT_FREETEXT:   typstr = "freetext";   break;
+            case FPDF_ANNOT_LINE:       typstr = "line";       break;
+            case FPDF_ANNOT_SQUARE:     typstr = "square";     break;
+            case FPDF_ANNOT_CIRCLE:     typstr = "circle";     break;
+            case FPDF_ANNOT_POLYGON:    typstr = "polygon";    break;
+            case FPDF_ANNOT_POLYLINE:   typstr = "polyline";   break;
+            case FPDF_ANNOT_HIGHLIGHT:  typstr = "highlight";  break;
+            case FPDF_ANNOT_UNDERLINE:  typstr = "underline";  break;
+            case FPDF_ANNOT_SQUIGGLY:   typstr = "squiggly";   break;
+            case FPDF_ANNOT_STRIKEOUT:  typstr = "strikeout";  break;
+            case FPDF_ANNOT_STAMP:      typstr = "stamp";      break;
+            case FPDF_ANNOT_CARET:      typstr = "caret";      break;
+            case FPDF_ANNOT_INK:        typstr = "ink";        break;
+            case FPDF_ANNOT_POPUP:      typstr = "popup";      break;
+            case FPDF_ANNOT_FILEATTACHMENT: typstr = "fileattachment"; break;
+            case FPDF_ANNOT_SOUND:      typstr = "sound";      break;
+            case FPDF_ANNOT_MOVIE:      typstr = "movie";      break;
+            case FPDF_ANNOT_WIDGET:     typstr = "widget";     break;
+            case FPDF_ANNOT_SCREEN:     typstr = "screen";     break;
+            case FPDF_ANNOT_PRINTERMARK: typstr = "printermark"; break;
+            case FPDF_ANNOT_TRAPNET:    typstr = "trapnet";    break;
+            case FPDF_ANNOT_WATERMARK:  typstr = "watermark";  break;
+            case FPDF_ANNOT_THREED:     typstr = "threed";     break;
+            case FPDF_ANNOT_RICHMEDIA:  typstr = "richmedia";  break;
+            case FPDF_ANNOT_XFAWIDGET: typstr = "xfawidget";  break;
+            default:                    typstr = "unknown";    break;
+        }
+
+        /* Bounding-Rect in Seitenkoordinaten */
+        FS_RECTF rect = {0, 0, 0, 0};
+        FPDFAnnot_GetRect(annot, &rect);
+        Tcl_Obj *rectobj = Tcl_NewListObj(0, NULL);
+        Tcl_ListObjAppendElement(interp, rectobj,
+                                 Tcl_NewDoubleObj((double)rect.left));
+        Tcl_ListObjAppendElement(interp, rectobj,
+                                 Tcl_NewDoubleObj((double)rect.bottom));
+        Tcl_ListObjAppendElement(interp, rectobj,
+                                 Tcl_NewDoubleObj((double)rect.right));
+        Tcl_ListObjAppendElement(interp, rectobj,
+                                 Tcl_NewDoubleObj((double)rect.top));
+
+        /* Inhalt (Contents) */
+        Tcl_Obj *content;
+        unsigned long clen = FPDFAnnot_GetStringValue(annot, "Contents", NULL, 0);
+        if (clen > 2) {
+            unsigned short *cbuf = (unsigned short *)ckalloc(clen + 2);
+            FPDFAnnot_GetStringValue(annot, "Contents", cbuf, clen);
+            content = _AnnotUtf16ToObj(interp, cbuf, clen);
+            ckfree((char *)cbuf);
+        } else {
+            content = Tcl_NewStringObj("", 0);
+        }
+
+        /* Autor (T) */
+        Tcl_Obj *author;
+        unsigned long alen = FPDFAnnot_GetStringValue(annot, "T", NULL, 0);
+        if (alen > 2) {
+            unsigned short *abuf = (unsigned short *)ckalloc(alen + 2);
+            FPDFAnnot_GetStringValue(annot, "T", abuf, alen);
+            author = _AnnotUtf16ToObj(interp, abuf, alen);
+            ckfree((char *)abuf);
+        } else {
+            author = Tcl_NewStringObj("", 0);
+        }
+
+        /* Datum (M = ModDate oder CreationDate) */
+        Tcl_Obj *date;
+        unsigned long dlen = FPDFAnnot_GetStringValue(annot, "M", NULL, 0);
+        if (dlen <= 2)
+            dlen = FPDFAnnot_GetStringValue(annot, "CreationDate", NULL, 0);
+        if (dlen > 2) {
+            unsigned short *dbuf = (unsigned short *)ckalloc(dlen + 2);
+            FPDFAnnot_GetStringValue(annot, "M", dbuf, dlen);
+            if (dlen <= 2)
+                FPDFAnnot_GetStringValue(annot, "CreationDate", dbuf, dlen);
+            date = _AnnotUtf16ToObj(interp, dbuf, dlen);
+            ckfree((char *)dbuf);
+        } else {
+            date = Tcl_NewStringObj("", 0);
+        }
+
+        /* Eintrag: {type rect content author date} */
+        Tcl_Obj *entry = Tcl_NewListObj(0, NULL);
+        Tcl_ListObjAppendElement(interp, entry,
+                                 Tcl_NewStringObj(typstr, -1));
+        Tcl_ListObjAppendElement(interp, entry, rectobj);
+        Tcl_ListObjAppendElement(interp, entry, content);
+        Tcl_ListObjAppendElement(interp, entry, author);
+        Tcl_ListObjAppendElement(interp, entry, date);
+        Tcl_ListObjAppendElement(interp, result, entry);
+
+        FPDFPage_CloseAnnot(annot);
+    }
+
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /* Pdfiumtcl_Init  --  wird von "load" aufgerufen                      */
 /* ------------------------------------------------------------------ */
-int
+PDFIUMTCL_EXPORT int
 Pdfiumtcl_Init(Tcl_Interp *interp)
 {
+    /* Stubs initialisieren -- Tcl 9 braucht "9.0", Tcl 8 "8.5" */
+#if TCL_MAJOR_VERSION >= 9
+    if (Tcl_InitStubs(interp, "9.0", 0) == NULL) return TCL_ERROR;
+    if (Tk_InitStubs(interp,  "9.0", 0) == NULL) return TCL_ERROR;
+#else
     if (Tcl_InitStubs(interp, "8.5", 0) == NULL) return TCL_ERROR;
-    if (Tk_InitStubs(interp, "8.5", 0)  == NULL) return TCL_ERROR;
+    if (Tk_InitStubs(interp,  "8.5", 0) == NULL) return TCL_ERROR;
+#endif
 
     FPDF_InitLibrary();
 
@@ -720,7 +922,9 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumBookmarksCmd,  NULL, NULL);
     Tcl_CreateObjCommand(interp, "pdfium::formfields",
                          PdfiumFormFieldsCmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::annot_list",
+                         PdfiumAnnotListCmd,  NULL, NULL);
 
-    Tcl_PkgProvide(interp, "pdfiumtcl", "0.3");
+    Tcl_PkgProvide(interp, "pdfiumtcl", "0.4");
     return TCL_OK;
 }

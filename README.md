@@ -1,15 +1,22 @@
-# pdfiumtcl
+# tclpdfium
 
-Tcl/Tk-Binding für PDFium — Googles PDF-Engine (BSD-Lizenz).
+Tcl/Tk binding for PDFium — Google's PDF rendering engine (BSD license).
 
-Erstes Tcl-Binding für PDFium. Ermöglicht PDF-Rendering, Textextraktion,
-Metadaten, Suche, Lesezeichen und Formularfelder direkt aus Tcl/Tk.
+The first PDFium binding for Tcl. Enables PDF rendering, text extraction,
+metadata, search, bookmarks, and form fields directly from Tcl/Tk.
 
-## Features (Version 0.3)
+**Version:** 0.3  
+**License:** BSD  
+**Platform:** Linux x86_64, Windows (experimental via MinGW)  
+**Tcl/Tk:** 8.5, 8.6, 9.0  
+
+---
+
+## Features
 
 ```tcl
-pdfium::open     filename ?password?   -> doc-handle
-pdfium::close    doc-handle
+pdfium::open      filename ?password?  -> doc-handle
+pdfium::close     doc-handle
 pdfium::pagecount doc-handle           -> integer
 pdfium::pagesize  doc-handle pagenum   -> {width_mm height_mm}
 pdfium::rotation  doc-handle pagenum   -> 0|90|180|270
@@ -18,86 +25,111 @@ pdfium::gettext   doc-handle pagenum   -> string
 pdfium::search    doc-handle pagenum text ?-case 0|1?
 pdfium::meta      doc-handle key       -> string
 pdfium::links     doc-handle pagenum   -> {url ...}
-pdfium::bookmarks doc-handle           -> {{titel pagenum level} ...}
+pdfium::bookmarks doc-handle           -> {{title pagenum level} ...}
 pdfium::formfields doc-handle pagenum  -> {{type name value} ...}
 ```
 
-## Verzeichnisstruktur
-
-```
-tclpdfium/
-  Makefile
-  pkgIndex.tcl
-  src/            C-Quellcode
-  app/            Tcl-Anwendungen (viewer.tcl, ppdtool.tcl)
-  scripts/        Shell-Skripte (setup.sh, createpdf.sh)
-  examples/       Beispiele
-  docs/           Dokumentation
-  vendor/pdfium/  PDFium-Bibliothek (siehe Setup)
-  pdf/            Test-PDFs
-  img/            PNG-Output
-```
+---
 
 ## Installation
 
-### 1. Abhängigkeiten
+### 1. Dependencies
 
 ```bash
 sudo apt install tcl-dev tk-dev build-essential
 ```
 
-### 2. PDFium einrichten
+### 2. Set up PDFium
 
 ```bash
 bash scripts/setup.sh
 ```
 
-Lädt `libpdfium.so` und Headers von
+Downloads `libpdfium.so` and headers from
 [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)
-nach `vendor/pdfium/`.
+into `vendor/pdfium/`.
 
-### 3. Kompilieren
+### 3. Build
 
 ```bash
 make clean && make
 make check
 ```
 
-## Viewer starten
+---
 
-```bash
-TCLLIBPATH=. wish app/viewer.tcl mein.pdf
-```
-
-## Beispiel
+## Quick Start
 
 ```tcl
 package require pdfiumtcl
 
-set doc [pdfium::open dokument.pdf]
-puts "Titel:  [pdfium::meta $doc Title]"
-puts "Seiten: [pdfium::pagecount $doc]"
+set doc [pdfium::open document.pdf]
+puts "Title:  [pdfium::meta $doc Title]"
+puts "Pages:  [pdfium::pagecount $doc]"
 
+# Bookmarks
 foreach bm [pdfium::bookmarks $doc] {
-    puts "[lindex $bm 2]-[lindex $bm 0]  (Seite [expr {[lindex $bm 1]+1}])"
+    puts "[lindex $bm 2]-[lindex $bm 0]  (page [expr {[lindex $bm 1]+1}])"
 }
+
+# Render page 0 at 150 dpi -> Tk photo image
+set img [pdfium::render $doc 0 -dpi 150]
+label .l -image $img
+pack .l
 
 pdfium::close $doc
 ```
 
-## Plattform
+---
 
-- Linux x86_64
-- Tcl/Tk 8.5+
-- Stub-basiert — läuft ohne Neukompilieren auf jedem Tcl 8.5+
+## Viewer
 
-## Lizenz
+```bash
+TCLLIBPATH=. wish app/viewer.tcl document.pdf
+```
 
-pdfiumtcl: BSD  
-PDFium: BSD (Apache CLA)
+---
 
-## Siehe auch
+## Directory Structure
 
-- [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)
-- [pdf4tcl](https://sourceforge.net/projects/pdf4tcl/) — PDF erzeugen
-- `docs/feature-matrix.md` — Vergleich pdf4tcl / pdfiumtcl / PDF 1.7 / PDF/A
+```
+tclpdfium/
+  Makefile
+  pkgIndex.tcl
+  src/              C source code (pdfiumtcl.c)
+  app/              Tcl applications (viewer.tcl, ppdtool.tcl)
+  scripts/          Shell scripts (setup.sh, createpdf.sh)
+  examples/         Example scripts
+  docs/             Documentation
+    en/             API reference, getting started
+  vendor/pdfium/    PDFium library (downloaded by setup.sh)
+    include/        PDFium headers
+    lib/            libpdfium.so / pdfium.dll (not in repo)
+    licenses/       Third-party licenses
+```
+
+---
+
+## Platform Notes
+
+- **Linux x86_64:** fully supported, tested on Tcl 8.6 and 9.0
+- **Windows:** experimental via MinGW/BAWT (see `docs/en/windows-build.md`)
+- **macOS:** not yet tested
+- **Stub-based:** runs without recompiling on any Tcl 8.5+
+
+---
+
+## See Also
+
+- [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) — prebuilt PDFium
+- [pdf4tcl](https://sourceforge.net/projects/pdf4tcl/) — create PDFs
+- [tkmcairo](https://github.com/gregnix/tkmcairo) — Cairo 2D graphics for Tcl
+- `docs/en/api-reference.md` — full API documentation
+
+---
+
+## License
+
+tclpdfium: BSD  
+PDFium: BSD (Apache CLA)  
+Third-party licenses: see `vendor/pdfium/licenses/`

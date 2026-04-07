@@ -3,33 +3,77 @@
 #
 # Aufruf: bash scripts/setup.sh
 #
-# Lädt pdfium-linux-x64.tgz von bblanchon/pdfium-binaries
-# und entpackt es nach vendor/pdfium/
+# Erkennt Plattform automatisch:
+#   Linux x86_64  -> pdfium-linux-x64.tgz
+#   Linux arm64   -> pdfium-linux-arm64.tgz
+#   macOS arm64   -> pdfium-mac-arm64.tgz
+#   macOS x86_64  -> pdfium-mac-x64.tgz
+#   Windows x64   -> pdfium-win-x64.tgz (fuer Cross-Compile)
+#
+# Manuell:
+#   PDFIUM_PLATFORM=windows bash scripts/setup.sh
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 VENDOR_DIR="$ROOT_DIR/vendor/pdfium"
-URL="https://github.com/bblanchon/pdfium-binaries/releases/latest/download/pdfium-linux-x64.tgz"
-TGZ="/tmp/pdfium-linux-x64.tgz"
+BASE_URL="https://github.com/bblanchon/pdfium-binaries/releases/latest/download"
+
+# Plattform ermitteln
+if [ -n "$PDFIUM_PLATFORM" ]; then
+    PLATFORM="$PDFIUM_PLATFORM"
+else
+    OS="$(uname -s)"
+    ARCH="$(uname -m)"
+    case "$OS" in
+        Linux)
+            case "$ARCH" in
+                aarch64|arm64) PLATFORM="linux-arm64" ;;
+                armv7*)        PLATFORM="linux-arm"   ;;
+                *)             PLATFORM="linux-x64"   ;;
+            esac ;;
+        Darwin)
+            case "$ARCH" in
+                arm64) PLATFORM="mac-arm64" ;;
+                *)     PLATFORM="mac-x64"   ;;
+            esac ;;
+        MINGW*|MSYS*|CYGWIN*)
+            PLATFORM="win-x64" ;;
+        *)
+            echo "WARNUNG: Unbekanntes System '$OS', nehme linux-x64"
+            PLATFORM="linux-x64" ;;
+    esac
+fi
+
+# Dateinamen und erwartete Library
+ARCHIVE="pdfium-${PLATFORM}.tgz"
+URL="$BASE_URL/$ARCHIVE"
+TMP="/tmp/$ARCHIVE"
+
+case "$PLATFORM" in
+    win*)   LIB="lib/pdfium.dll" ;;
+    mac*)   LIB="lib/libpdfium.dylib" ;;
+    *)      LIB="lib/libpdfium.so" ;;
+esac
 
 echo "==> pdfiumtcl setup"
-echo "    Ziel: $VENDOR_DIR"
+echo "    Plattform: $PLATFORM"
+echo "    Ziel:      $VENDOR_DIR"
 echo ""
 
-# Prüfen ob libpdfium.so bereits vorhanden
-if [ -f "$VENDOR_DIR/lib/libpdfium.so" ]; then
-    echo "OK: libpdfium.so bereits vorhanden — überspringe Download."
+# Pruefen ob bereits vorhanden
+if [ -f "$VENDOR_DIR/$LIB" ]; then
+    echo "OK: PDFium bereits vorhanden ($LIB) — ueberspringe Download."
     echo "    Zum Neuinstallieren: rm -rf vendor/pdfium/lib vendor/pdfium/include"
     exit 0
 fi
 
-# wget oder curl?
+# wget oder curl
 if command -v wget &>/dev/null; then
-    DL="wget -q --show-progress -O $TGZ $URL"
+    DL="wget -q --show-progress -O $TMP $URL"
 elif command -v curl &>/dev/null; then
-    DL="curl -L --progress-bar -o $TGZ $URL"
+    DL="curl -L --progress-bar -o $TMP $URL"
 else
     echo "FEHLER: weder wget noch curl gefunden."
     exit 1
@@ -41,19 +85,32 @@ $DL
 
 echo "==> Entpacke nach $VENDOR_DIR ..."
 mkdir -p "$VENDOR_DIR"
-tar -xzf "$TGZ" -C "$VENDOR_DIR"
-rm -f "$TGZ"
+tar -xzf "$TMP" -C "$VENDOR_DIR"
+rm -f "$TMP"
 
-# Prüfen
-if [ -f "$VENDOR_DIR/lib/libpdfium.so" ]; then
+# Ergebnis prüfen
+if [ -f "$VENDOR_DIR/$LIB" ]; then
     echo ""
     echo "OK: PDFium eingerichtet."
-    echo "    lib:     $VENDOR_DIR/lib/libpdfium.so"
-    echo "    include: $VENDOR_DIR/include/"
+    echo "    $VENDOR_DIR/$LIB"
+    echo "    $VENDOR_DIR/include/"
     echo ""
-    echo "==> Jetzt kompilieren:"
-    echo "    make clean && make"
+    case "$PLATFORM" in
+        win*)
+            echo "==> Cross-Compile fuer Windows:"
+            echo "    make PLATFORM=windows"
+            echo ""
+            echo "    Tcl-Stub-Library setzen (Magicsplat-Pfad als Beispiel):"
+            echo "    make PLATFORM=windows WIN_TCL_ROOT=/pfad/zu/tcl" ;;
+        mac*)
+            echo "==> Kompilieren:"
+            echo "    make clean && make" ;;
+        *)
+            echo "==> Kompilieren:"
+            echo "    make clean && make" ;;
+    esac
 else
-    echo "FEHLER: libpdfium.so nicht gefunden nach Entpacken."
+    echo "FEHLER: $LIB nicht gefunden nach Entpacken."
+    echo "        Bitte manuell pruefen: ls $VENDOR_DIR/lib/"
     exit 1
 fi
