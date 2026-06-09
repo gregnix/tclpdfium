@@ -52,7 +52,7 @@ URL="$BASE_URL/$ARCHIVE"
 TMP="/tmp/$ARCHIVE"
 
 case "$PLATFORM" in
-    win*)   LIB="lib/pdfium.dll" ;;
+    win*)   LIB="bin/pdfium.dll" ;;   # runtime DLL is in bin/, import lib in lib/
     mac*)   LIB="lib/libpdfium.dylib" ;;
     *)      LIB="lib/libpdfium.so" ;;
 esac
@@ -65,7 +65,7 @@ echo ""
 # Pruefen ob bereits vorhanden
 if [ -f "$VENDOR_DIR/$LIB" ]; then
     echo "OK: PDFium bereits vorhanden ($LIB) — ueberspringe Download."
-    echo "    Zum Neuinstallieren: rm -rf vendor/pdfium/lib vendor/pdfium/include"
+    echo "    Zum Neuinstallieren: rm -rf vendor/pdfium/lib vendor/pdfium/bin vendor/pdfium/include"
     exit 0
 fi
 
@@ -97,11 +97,17 @@ if [ -f "$VENDOR_DIR/$LIB" ]; then
     echo ""
     case "$PLATFORM" in
         win*)
-            echo "==> Cross-Compile fuer Windows:"
-            echo "    make PLATFORM=windows"
+            if [ ! -f "$VENDOR_DIR/lib/pdfium.dll.lib" ]; then
+                echo "WARNUNG: lib/pdfium.dll.lib fehlt — zum Linken erforderlich."
+            fi
+            echo "==> Windows-Build (nativ MSYS2 oder Cross-Compile):"
+            echo "    make PLATFORM=windows            # Tcl 8.6"
+            echo "    make windows90                   # Tcl 9.0"
             echo ""
-            echo "    Tcl-Stub-Library setzen (Magicsplat-Pfad als Beispiel):"
-            echo "    make PLATFORM=windows WIN_TCL_ROOT=/pfad/zu/tcl" ;;
+            echo "    Tcl-Stub-Library/Header ggf. setzen:"
+            echo "    make PLATFORM=windows WIN_TCL_ROOT=/pfad/zu/tcl"
+            echo ""
+            echo "    Hinweis: pdfium.dll (aus bin/) muss neben pdfiumtcl.dll liegen." ;;
         mac*)
             echo "==> Kompilieren:"
             echo "    make clean && make" ;;

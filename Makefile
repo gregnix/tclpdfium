@@ -23,15 +23,32 @@
 # ------------------------------------------------------------------ #
 # Plattform                                                           #
 # ------------------------------------------------------------------ #
-PLATFORM ?= linux
+# MSYS2 sets MSYSTEM_PREFIX to /ucrt64 or /mingw64 (empty when cross-compiling
+# from Linux). Used to auto-select the platform and locate Tcl/Tk headers/stubs.
+MSYS2_PREFIX := $(MSYSTEM_PREFIX)
+
+ifeq ($(MSYS2_PREFIX),)
+    PLATFORM ?= linux
+else
+    PLATFORM ?= windows
+endif
 
 WIN_TCL_ROOT ?= C:/Tcl
 
 ifeq ($(PLATFORM),windows)
-    CC              = x86_64-w64-mingw32-gcc
+    ifeq ($(MSYS2_PREFIX),)
+        CC          = x86_64-w64-mingw32-gcc
+    else
+        CC          = gcc
+    endif
     PDFIUM_LIB_FILE = pdfium.dll
     OS_CFLAGS       = -DWIN32 -D_WIN32 -DWIN32_LEAN_AND_MEAN
-    OS_LFLAGS       = -lws2_32 -Wl,--export-all-symbols
+    # Self-contained DLL: statically link the MinGW runtime so it does not
+    # depend on libgcc_s_seh-1.dll / libwinpthread-1.dll being on PATH
+    # (those live in the MSYS2 bin dir and are missing outside that shell).
+    OS_LFLAGS       = -lws2_32 -static-libgcc \
+                      -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic \
+                      -Wl,--export-all-symbols
     BINARY_NAME     = pdfiumtcl.dll
     ifeq ($(TCL_VERSION),9.0)
         SUBDIR = windows64-tcl9
@@ -86,15 +103,17 @@ ifeq ($(TCL_VERSION),9.0)
     TCL_STUB_NAME  = tclstub9.0
     TK_STUB_NAME   = tkstub9.0
     ifeq ($(PLATFORM),windows)
-        TCL_INC    := -I$(WIN_TCL_ROOT)/include
-        TK_INC     := -I$(WIN_TCL_ROOT)/include
+        TCL_INC    := -I$(WIN_TCL_ROOT)/include -I$(MSYS2_PREFIX)/include
+        TK_INC     := -I$(WIN_TCL_ROOT)/include -I$(MSYS2_PREFIX)/include
         TCL_STUBLIB := $(firstword $(wildcard \
             $(WIN_TCL_ROOT)/lib/libtclstub90.a \
             $(WIN_TCL_ROOT)/lib/tclstub90.lib \
+            $(MSYS2_PREFIX)/lib/libtclstub9.0.a \
             /mingw64/lib/libtclstub9.0.a))
         TK_STUBLIB  := $(firstword $(wildcard \
             $(WIN_TCL_ROOT)/lib/libtkstub90.a \
             $(WIN_TCL_ROOT)/lib/tkstub90.lib \
+            $(MSYS2_PREFIX)/lib/libtkstub9.0.a \
             /mingw64/lib/libtkstub9.0.a))
     else
         TCL_INC    := -I/usr/include/tcl9.0
@@ -134,15 +153,17 @@ else
     TCL_STUB_NAME  = tclstub8.6
     TK_STUB_NAME   = tkstub8.6
     ifeq ($(PLATFORM),windows)
-        TCL_INC    := -I$(WIN_TCL_ROOT)/include
-        TK_INC     := -I$(WIN_TCL_ROOT)/include
+        TCL_INC    := -I$(WIN_TCL_ROOT)/include -I$(MSYS2_PREFIX)/include
+        TK_INC     := -I$(WIN_TCL_ROOT)/include -I$(MSYS2_PREFIX)/include
         TCL_STUBLIB := $(firstword $(wildcard \
             $(WIN_TCL_ROOT)/lib/libtclstub86.a \
             $(WIN_TCL_ROOT)/lib/tclstub86.lib \
+            $(MSYS2_PREFIX)/lib/libtclstub8.6.a \
             /mingw64/lib/libtclstub8.6.a))
         TK_STUBLIB  := $(firstword $(wildcard \
             $(WIN_TCL_ROOT)/lib/libtkstub86.a \
             $(WIN_TCL_ROOT)/lib/tkstub86.lib \
+            $(MSYS2_PREFIX)/lib/libtkstub8.6.a \
             /mingw64/lib/libtkstub8.6.a))
     else
         TCL_INC    := $(shell pkg-config --cflags tcl 2>/dev/null || echo -I/usr/include/tcl8.6)
@@ -343,8 +364,17 @@ install-windows: $(TARGET)
 	mkdir -p "$(WIN_INSTALL_DIR)/$(SUBDIR)"
 	cp $(TARGET) "$(WIN_INSTALL_DIR)/$(SUBDIR)/"
 	cp pkgIndex.tcl "$(WIN_INSTALL_DIR)/"
+	@if [ -f "$(PDFIUM_DIR)/bin/pdfium.dll" ]; then \
+	    cp "$(PDFIUM_DIR)/bin/pdfium.dll" "$(WIN_INSTALL_DIR)/$(SUBDIR)/"; \
+	    echo "OK: pdfium.dll -> $(WIN_INSTALL_DIR)/$(SUBDIR)/"; \
+	elif [ -f "$(PDFIUM_DIR)/lib/pdfium.dll" ]; then \
+	    cp "$(PDFIUM_DIR)/lib/pdfium.dll" "$(WIN_INSTALL_DIR)/$(SUBDIR)/"; \
+	    echo "OK: pdfium.dll -> $(WIN_INSTALL_DIR)/$(SUBDIR)/"; \
+	else \
+	    echo "WARNUNG: pdfium.dll nicht gefunden unter $(PDFIUM_DIR)/bin oder lib"; \
+	    echo "         -> setup.sh ausfuehren und pdfium.dll manuell kopieren."; \
+	fi
 	@echo "OK: $(WIN_INSTALL_DIR)/$(SUBDIR)/$(TARGET)"
-	@echo "    pdfium.dll ebenfalls nach $(WIN_INSTALL_DIR)/$(SUBDIR)/ kopieren."
 
 clean:
 	rm -f pdfiumtcl.so pdfiumtcl.dll
