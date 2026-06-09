@@ -19,6 +19,17 @@
  *   pdfium::render doc-handle pagenum ?-dpi 150? ?-imagename myimg?
  *                                       -> image-name (Tk photo)
  *   pdfium::gettext doc-handle pagenum  -> string
+ *
+ * Write / edit (0.4):
+ *   pdfium::newdoc                              -> doc-handle (empty)
+ *   pdfium::newpage doc index width height      -> page-handle (points)
+ *   pdfium::closepage page
+ *   pdfium::generatecontent page                -> 0/1
+ *   pdfium::importpages dest src ?range? ?index? -> 0/1   (range "1,3,5-7")
+ *   pdfium::setcropbox  doc pageindex l b r t   -> 1      (points)
+ *   pdfium::setmediabox doc pageindex l b r t   -> 1      (points)
+ *   pdfium::addimagejpeg page doc jpeg x y w h  -> 0/1    (points)
+ *   pdfium::save doc filename ?flags?           -> 0/1
  */
 
 #include <tcl.h>
@@ -28,6 +39,9 @@
 #include <fpdf_doc.h>
 #include <fpdf_annot.h>
 #include <fpdf_edit.h>
+#include <fpdf_save.h>
+#include <fpdf_ppo.h>
+#include <fpdf_transformpage.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -882,6 +896,238 @@ PdfiumAnnotListCmd(ClientData cd, Tcl_Interp *interp,
 /* ------------------------------------------------------------------ */
 /* Pdfiumtcl_Init  --  wird von "load" aufgerufen                      */
 /* ------------------------------------------------------------------ */
+/* ================================================================== */
+/* Write / edit commands (pdfiumtcl 0.4: pdfium becomes write-capable) */
+/* ================================================================== */
+
+/* ---- file writer for FPDF_SaveAsCopy ----------------------------- */
+typedef struct {
+    FPDF_FILEWRITE base;
+    FILE          *fp;
+} TclFileWrite;
+
+static int
+WriteBlockToFile(FPDF_FILEWRITE *self, const void *data, unsigned long size)
+{
+    TclFileWrite *w = (TclFileWrite *)self;
+    return (fwrite(data, 1, size, w->fp) == size) ? 1 : 0;
+}
+
+/* ---- in-memory file reader for LoadJpegFileInline ---------------- */
+typedef struct {
+    const unsigned char *data;
+    unsigned long        len;
+} MemBuf;
+
+static int
+MemGetBlock(void *param, unsigned long pos, unsigned char *buf, unsigned long size)
+{
+    MemBuf *m = (MemBuf *)param;
+    if ((unsigned long)pos + size > m->len) return 0;
+    memcpy(buf, m->data + pos, size);
+    return 1;
+}
+
+/* pdfium::newdoc  -> doc-handle (empty document) */
+static int
+PdfiumNewDocCmd(ClientData cd, Tcl_Interp *interp,
+                int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 1) { Tcl_WrongNumArgs(interp, 1, objv, ""); return TCL_ERROR; }
+    FPDF_DOCUMENT doc = FPDF_CreateNewDocument();
+    if (!doc) PDFIUM_ERROR(interp, "cannot create new document");
+    Tcl_SetObjResult(interp, Tcl_NewWideIntObj((Tcl_WideInt)(intptr_t)doc));
+    return TCL_OK;
+}
+
+/* pdfium::newpage doc-handle index width height  -> page-handle (points) */
+static int
+PdfiumNewPageCmd(ClientData cd, Tcl_Interp *interp,
+                 int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 5) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle index width height");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr; int index; double w, h;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp, objv[2], &index)   != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[3], &w)     != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[4], &h)     != TCL_OK) return TCL_ERROR;
+    FPDF_PAGE page = FPDFPage_New((FPDF_DOCUMENT)(intptr_t)ptr, index, w, h);
+    if (!page) PDFIUM_ERROR(interp, "cannot create page");
+    Tcl_SetObjResult(interp, Tcl_NewWideIntObj((Tcl_WideInt)(intptr_t)page));
+    return TCL_OK;
+}
+
+/* pdfium::closepage page-handle */
+static int
+PdfiumClosePageCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 2) { Tcl_WrongNumArgs(interp, 1, objv, "page-handle"); return TCL_ERROR; }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    FPDF_ClosePage((FPDF_PAGE)(intptr_t)ptr);
+    return TCL_OK;
+}
+
+/* pdfium::generatecontent page-handle  -> 0/1 */
+static int
+PdfiumGenerateContentCmd(ClientData cd, Tcl_Interp *interp,
+                         int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 2) { Tcl_WrongNumArgs(interp, 1, objv, "page-handle"); return TCL_ERROR; }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    FPDF_BOOL ok = FPDFPage_GenerateContent((FPDF_PAGE)(intptr_t)ptr);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(ok));
+    return TCL_OK;
+}
+
+/* pdfium::importpages dest-handle src-handle ?pagerange? ?index?  -> 0/1
+ * pagerange: "1,3,5-7" (1-based) or "" / omitted for all pages. */
+static int
+PdfiumImportPagesCmd(ClientData cd, Tcl_Interp *interp,
+                     int objc, Tcl_Obj *const objv[])
+{
+    if (objc < 3 || objc > 5) {
+        Tcl_WrongNumArgs(interp, 1, objv, "dest-handle src-handle ?pagerange? ?index?");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt dptr, sptr; int index = 0;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &dptr) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetWideIntFromObj(interp, objv[2], &sptr) != TCL_OK) return TCL_ERROR;
+    const char *range = (objc >= 4) ? Tcl_GetString(objv[3]) : NULL;
+    if (range && range[0] == '\0') range = NULL;
+    if (objc == 5 && Tcl_GetIntFromObj(interp, objv[4], &index) != TCL_OK) return TCL_ERROR;
+    FPDF_BOOL ok = FPDF_ImportPages((FPDF_DOCUMENT)(intptr_t)dptr,
+                                    (FPDF_DOCUMENT)(intptr_t)sptr, range, index);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(ok));
+    return TCL_OK;
+}
+
+/* shared box setter: which==1 crop, 0 media */
+static int
+PdfiumSetBox(Tcl_Interp *interp, int objc, Tcl_Obj *const objv[], int isCrop)
+{
+    if (objc != 7) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pageindex left bottom right top");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr; int idx; double l, b, r, t;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp, objv[2], &idx)     != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[3], &l)     != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[4], &b)     != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[5], &r)     != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[6], &t)     != TCL_OK) return TCL_ERROR;
+    FPDF_PAGE page = FPDF_LoadPage((FPDF_DOCUMENT)(intptr_t)ptr, idx);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+    if (isCrop) FPDFPage_SetCropBox(page, (float)l, (float)b, (float)r, (float)t);
+    else        FPDFPage_SetMediaBox(page, (float)l, (float)b, (float)r, (float)t);
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(1));
+    return TCL_OK;
+}
+
+/* pdfium::setcropbox doc-handle pageindex left bottom right top  -> 1 */
+static int
+PdfiumSetCropBoxCmd(ClientData cd, Tcl_Interp *interp,
+                    int objc, Tcl_Obj *const objv[])
+{ return PdfiumSetBox(interp, objc, objv, 1); }
+
+/* pdfium::setmediabox doc-handle pageindex left bottom right top  -> 1 */
+static int
+PdfiumSetMediaBoxCmd(ClientData cd, Tcl_Interp *interp,
+                     int objc, Tcl_Obj *const objv[])
+{ return PdfiumSetBox(interp, objc, objv, 0); }
+
+/* pdfium::addimagejpeg page-handle doc-handle jpegfile x y w h  -> 0/1
+ * Embeds a JPEG as an image object on the page, scaled to w x h points,
+ * positioned at (x,y) in points (origin bottom-left). */
+static int
+PdfiumAddImageJpegCmd(ClientData cd, Tcl_Interp *interp,
+                      int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 8) {
+        Tcl_WrongNumArgs(interp, 1, objv, "page-handle doc-handle jpegfile x y w h");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt pptr, dptr; double x, y, w, h;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &pptr) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetWideIntFromObj(interp, objv[2], &dptr) != TCL_OK) return TCL_ERROR;
+    const char *fn = Tcl_GetString(objv[3]);
+    if (Tcl_GetDoubleFromObj(interp, objv[4], &x) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[5], &y) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[6], &w) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[7], &h) != TCL_OK) return TCL_ERROR;
+
+    FILE *fp = fopen(fn, "rb");
+    if (!fp) PDFIUM_ERROR(interp, "cannot open JPEG file");
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (sz <= 0) { fclose(fp); PDFIUM_ERROR(interp, "empty JPEG file"); }
+    unsigned char *buf = (unsigned char *)malloc((size_t)sz);
+    if (!buf) { fclose(fp); PDFIUM_ERROR(interp, "out of memory"); }
+    if (fread(buf, 1, (size_t)sz, fp) != (size_t)sz) {
+        free(buf); fclose(fp); PDFIUM_ERROR(interp, "cannot read JPEG file");
+    }
+    fclose(fp);
+
+    MemBuf mb; mb.data = buf; mb.len = (unsigned long)sz;
+    FPDF_FILEACCESS fa;
+    fa.m_FileLen  = (unsigned long)sz;
+    fa.m_GetBlock = MemGetBlock;
+    fa.m_Param    = &mb;
+
+    FPDF_DOCUMENT  doc  = (FPDF_DOCUMENT)(intptr_t)dptr;
+    FPDF_PAGE      page = (FPDF_PAGE)(intptr_t)pptr;
+    FPDF_PAGEOBJECT obj = FPDFPageObj_NewImageObj(doc);
+    if (!obj) { free(buf); PDFIUM_ERROR(interp, "cannot create image object"); }
+
+    FPDF_PAGE pages[1]; pages[0] = page;
+    FPDF_BOOL ok = FPDFImageObj_LoadJpegFileInline(pages, 1, obj, &fa);
+    if (ok) {
+        FPDFImageObj_SetMatrix(obj, w, 0, 0, h, x, y);
+        FPDFPage_InsertObject(page, obj);
+    } else {
+        FPDFPageObj_Destroy(obj);
+    }
+    free(buf);  /* Inline variant copies the data into the document */
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(ok));
+    return TCL_OK;
+}
+
+/* pdfium::save doc-handle filename ?flags?  -> 0/1
+ * flags default = FPDF_NO_INCREMENTAL (clean full rewrite). */
+static int
+PdfiumSaveCmd(ClientData cd, Tcl_Interp *interp,
+              int objc, Tcl_Obj *const objv[])
+{
+    if (objc < 3 || objc > 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle filename ?flags?");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr; int flags = FPDF_NO_INCREMENTAL;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    const char *fn = Tcl_GetString(objv[2]);
+    if (objc == 4 && Tcl_GetIntFromObj(interp, objv[3], &flags) != TCL_OK) return TCL_ERROR;
+
+    FILE *fp = fopen(fn, "wb");
+    if (!fp) PDFIUM_ERROR(interp, "cannot open output file for writing");
+    TclFileWrite w;
+    w.base.version    = 1;
+    w.base.WriteBlock = WriteBlockToFile;
+    w.fp              = fp;
+    FPDF_BOOL ok = FPDF_SaveAsCopy((FPDF_DOCUMENT)(intptr_t)ptr,
+                                   &w.base, (FPDF_DWORD)flags);
+    fclose(fp);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(ok));
+    return TCL_OK;
+}
+
 PDFIUMTCL_EXPORT int
 Pdfiumtcl_Init(Tcl_Interp *interp)
 {
@@ -924,6 +1170,26 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumFormFieldsCmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "pdfium::annot_list",
                          PdfiumAnnotListCmd,  NULL, NULL);
+
+    /* --- write / edit (0.4) --- */
+    Tcl_CreateObjCommand(interp, "pdfium::newdoc",
+                         PdfiumNewDocCmd,          NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::newpage",
+                         PdfiumNewPageCmd,         NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::closepage",
+                         PdfiumClosePageCmd,       NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::generatecontent",
+                         PdfiumGenerateContentCmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::importpages",
+                         PdfiumImportPagesCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::setcropbox",
+                         PdfiumSetCropBoxCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::setmediabox",
+                         PdfiumSetMediaBoxCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::addimagejpeg",
+                         PdfiumAddImageJpegCmd,    NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::save",
+                         PdfiumSaveCmd,            NULL, NULL);
 
     Tcl_PkgProvide(interp, "pdfiumtcl", "0.4");
     return TCL_OK;
