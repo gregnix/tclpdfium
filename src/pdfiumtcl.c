@@ -1,4 +1,7 @@
 /*
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2026 Gregor Ebbing
+ *
  * pdfiumtcl.c  --  Minimales PDFium-Binding für Tcl/Tk
  *
  * Kompilieren:
@@ -29,7 +32,11 @@
  *   pdfium::setcropbox  doc pageindex l b r t   -> 1      (points)
  *   pdfium::setmediabox doc pageindex l b r t   -> 1      (points)
  *   pdfium::addimagejpeg page doc jpeg x y w h  -> 0/1    (points)
+ *   pdfium::addimagebitmap page doc photo x y w h -> 0/1  (points, lossless)
+ *   pdfium::deletepage doc index                -> 1
+ *   pdfium::setrotation doc index degrees        -> 0/1   (0|90|180|270)
  *   pdfium::save doc filename ?flags?           -> 0/1
+ *   pdfium::savewithversion doc filename version ?flags? -> 0/1
  */
 
 #include <tcl.h>
@@ -1128,6 +1135,145 @@ PdfiumSaveCmd(ClientData cd, Tcl_Interp *interp,
     return TCL_OK;
 }
 
+/* pdfium::addimagebitmap page-handle doc-handle photoName x y w h  -> 0/1
+ * Embeds a Tk photo image (lossless, no JPEG artifacts) as an image object,
+ * scaled to w x h points, positioned at (x,y) in points (origin bottom-left).
+ * Pixels are read via the Tk stub API (Tk_FindPhoto / Tk_PhotoGetImage), so
+ * this works unchanged on Windows/macOS/Linux. */
+static int
+PdfiumAddImageBitmapCmd(ClientData cd, Tcl_Interp *interp,
+                        int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 8) {
+        Tcl_WrongNumArgs(interp, 1, objv, "page-handle doc-handle photo x y w h");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt pptr, dptr; double x, y, w, h;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &pptr) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetWideIntFromObj(interp, objv[2], &dptr) != TCL_OK) return TCL_ERROR;
+    const char *photoName = Tcl_GetString(objv[3]);
+    if (Tcl_GetDoubleFromObj(interp, objv[4], &x) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[5], &y) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[6], &w) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[7], &h) != TCL_OK) return TCL_ERROR;
+
+    Tk_PhotoHandle photo = Tk_FindPhoto(interp, photoName);
+    if (!photo) PDFIUM_ERROR(interp, "no such photo image");
+    Tk_PhotoImageBlock blk;
+    if (!Tk_PhotoGetImage(photo, &blk))
+        PDFIUM_ERROR(interp, "cannot read photo image");
+    int iw = blk.width, ih = blk.height;
+    if (iw <= 0 || ih <= 0) PDFIUM_ERROR(interp, "empty photo image");
+
+    /* pdfium expects a BGRA, top-down bitmap; Tk photo rows are top-down too. */
+    FPDF_BITMAP bmp = FPDFBitmap_CreateEx(iw, ih, FPDFBitmap_BGRA, NULL, 0);
+    if (!bmp) PDFIUM_ERROR(interp, "cannot create bitmap");
+    unsigned char *dstbuf = (unsigned char *)FPDFBitmap_GetBuffer(bmp);
+    int stride = FPDFBitmap_GetStride(bmp);
+    int hasAlpha = (blk.pixelSize >= 4);
+    for (int row = 0; row < ih; row++) {
+        unsigned char *src = blk.pixelPtr + (size_t)row * blk.pitch;
+        unsigned char *dst = dstbuf + (size_t)row * stride;
+        for (int col = 0; col < iw; col++) {
+            unsigned char *sp = src + (size_t)col * blk.pixelSize;
+            unsigned char *dp = dst + (size_t)col * 4;
+            dp[0] = sp[blk.offset[2]];                 /* B */
+            dp[1] = sp[blk.offset[1]];                 /* G */
+            dp[2] = sp[blk.offset[0]];                 /* R */
+            dp[3] = hasAlpha ? sp[blk.offset[3]] : 255;/* A */
+        }
+    }
+
+    FPDF_DOCUMENT   doc  = (FPDF_DOCUMENT)(intptr_t)dptr;
+    FPDF_PAGE       page = (FPDF_PAGE)(intptr_t)pptr;
+    FPDF_PAGEOBJECT obj  = FPDFPageObj_NewImageObj(doc);
+    if (!obj) { FPDFBitmap_Destroy(bmp);
+                PDFIUM_ERROR(interp, "cannot create image object"); }
+
+    FPDF_PAGE pages[1]; pages[0] = page;
+    FPDF_BOOL ok = FPDFImageObj_SetBitmap(pages, 1, obj, bmp);
+    if (ok) {
+        FPDFImageObj_SetMatrix(obj, w, 0, 0, h, x, y);
+        FPDFPage_InsertObject(page, obj);
+    } else {
+        FPDFPageObj_Destroy(obj);
+    }
+    /* SetBitmap retains its own copy; safe to destroy now. */
+    FPDFBitmap_Destroy(bmp);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(ok));
+    return TCL_OK;
+}
+
+/* pdfium::deletepage doc-handle index  -> 1  (removes a page) */
+static int
+PdfiumDeletePageCmd(ClientData cd, Tcl_Interp *interp,
+                    int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle index");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr; int idx;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp, objv[2], &idx)     != TCL_OK) return TCL_ERROR;
+    FPDFPage_Delete((FPDF_DOCUMENT)(intptr_t)ptr, idx);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(1));
+    return TCL_OK;
+}
+
+/* pdfium::setrotation doc-handle index degrees  -> 0/1
+ * degrees must be 0, 90, 180 or 270. */
+static int
+PdfiumSetRotationCmd(ClientData cd, Tcl_Interp *interp,
+                     int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle index degrees");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr; int idx, deg;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp, objv[2], &idx)     != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp, objv[3], &deg)     != TCL_OK) return TCL_ERROR;
+    if (deg % 90 != 0) PDFIUM_ERROR(interp, "degrees must be 0, 90, 180 or 270");
+    int rot = ((deg / 90) % 4 + 4) % 4;   /* normalise, accept negatives */
+    FPDF_PAGE page = FPDF_LoadPage((FPDF_DOCUMENT)(intptr_t)ptr, idx);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+    FPDFPage_SetRotation(page, rot);
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(1));
+    return TCL_OK;
+}
+
+/* pdfium::savewithversion doc-handle filename version ?flags?  -> 0/1
+ * version: PDF version as integer, e.g. 14 (1.4) .. 17 (1.7). */
+static int
+PdfiumSaveWithVersionCmd(ClientData cd, Tcl_Interp *interp,
+                         int objc, Tcl_Obj *const objv[])
+{
+    if (objc < 4 || objc > 5) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle filename version ?flags?");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr; int version, flags = FPDF_NO_INCREMENTAL;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    const char *fn = Tcl_GetString(objv[2]);
+    if (Tcl_GetIntFromObj(interp, objv[3], &version) != TCL_OK) return TCL_ERROR;
+    if (objc == 5 && Tcl_GetIntFromObj(interp, objv[4], &flags) != TCL_OK) return TCL_ERROR;
+
+    FILE *fp = fopen(fn, "wb");
+    if (!fp) PDFIUM_ERROR(interp, "cannot open output file for writing");
+    TclFileWrite w;
+    w.base.version    = 1;
+    w.base.WriteBlock = WriteBlockToFile;
+    w.fp              = fp;
+    FPDF_BOOL ok = FPDF_SaveWithVersion((FPDF_DOCUMENT)(intptr_t)ptr,
+                                        &w.base, (FPDF_DWORD)flags, version);
+    fclose(fp);
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(ok));
+    return TCL_OK;
+}
+
 PDFIUMTCL_EXPORT int
 Pdfiumtcl_Init(Tcl_Interp *interp)
 {
@@ -1188,8 +1334,16 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumSetMediaBoxCmd,     NULL, NULL);
     Tcl_CreateObjCommand(interp, "pdfium::addimagejpeg",
                          PdfiumAddImageJpegCmd,    NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::addimagebitmap",
+                         PdfiumAddImageBitmapCmd,  NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::deletepage",
+                         PdfiumDeletePageCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::setrotation",
+                         PdfiumSetRotationCmd,     NULL, NULL);
     Tcl_CreateObjCommand(interp, "pdfium::save",
                          PdfiumSaveCmd,            NULL, NULL);
+    Tcl_CreateObjCommand(interp, "pdfium::savewithversion",
+                         PdfiumSaveWithVersionCmd, NULL, NULL);
 
     Tcl_PkgProvide(interp, "pdfiumtcl", "0.4");
     return TCL_OK;

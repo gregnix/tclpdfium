@@ -1,4 +1,6 @@
 #!/usr/bin/env tclsh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Gregor Ebbing
 # test-etikett-54mm.tcl
 #
 # Erzeugt ein Test-Etikett 54 x H mm fuer den Brother QL-820

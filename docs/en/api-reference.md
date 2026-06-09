@@ -1,6 +1,6 @@
 # pdfiumtcl API Reference
 
-Version: 0.3
+Version: 0.4
 
 ---
 
@@ -219,6 +219,187 @@ foreach field [pdfium::formfields $doc 0] {
     puts "$type  $name  = $value"
 }
 ```
+
+---
+
+### pdfium::annot_list
+
+```tcl
+pdfium::annot_list doc-handle pagenum
+```
+
+Returns a list of all annotations on the page.
+Each entry is `{type rect content author date}`.
+
+- `type` — `text` `link` `freetext` `line` `square` `circle` `polygon`
+  `polyline` `highlight` `underline` `squiggly` `strikeout` `stamp`
+  `caret` `ink` `popup` `fileattachment` `sound` `movie` `widget`
+  `screen` `printermark` `trapnet` `watermark` `threed` `richmedia`
+  `xfawidget` `unknown`
+- `rect` — `{left bottom right top}` in page coordinates (points)
+- `content`, `author`, `date` — strings (may be empty)
+
+```tcl
+foreach a [pdfium::annot_list $doc 0] {
+    lassign $a type rect content author date
+    puts "$type  $rect  $content"
+}
+```
+
+---
+
+## Writing / Editing (0.4)
+
+Since 0.4 pdfiumtcl can also create and modify PDFs.
+
+> **Units:** `pagesize` returns millimetres, but all writing commands
+> below expect **points** (`pt = mm * 72 / 25.4`). The page origin is the
+> bottom-left corner.
+>
+> Encrypted saving and vector/text drawing are intentionally **not**
+> provided — use [pdf4tcl](https://sourceforge.net/projects/pdf4tcl/) for
+> those. PDFium offers no suitable public write API.
+
+A document/page/object handle is a wide integer, exactly like the
+`doc-handle` returned by `pdfium::open`. Pages created with `newpage` must
+be closed with `closepage`; documents with `close`.
+
+### pdfium::newdoc
+
+```tcl
+pdfium::newdoc
+```
+
+Creates an empty document and returns its `doc-handle`.
+
+### pdfium::newpage
+
+```tcl
+pdfium::newpage doc-handle index width height
+```
+
+Inserts a new blank page at `index` (0-based), `width`/`height` in points.
+Returns a `page-handle`.
+
+```tcl
+set doc  [pdfium::newdoc]
+set page [pdfium::newpage $doc 0 595 842]   ;# A4 in points
+```
+
+### pdfium::closepage
+
+```tcl
+pdfium::closepage page-handle
+```
+
+Releases a page handle obtained from `newpage`.
+
+### pdfium::generatecontent
+
+```tcl
+pdfium::generatecontent page-handle
+```
+
+Regenerates the page content stream. Call this after adding/changing page
+objects (e.g. images) and before `save`. Returns `0|1`.
+
+### pdfium::importpages
+
+```tcl
+pdfium::importpages dest-handle src-handle ?pagerange? ?index?
+```
+
+Copies pages from `src` into `dest` at `index` (default 0).
+`pagerange` is 1-based, e.g. `"1,3,5-7"`; omit it or pass `""` for all
+pages. Returns `0|1`. Replaces qpdf for extract/split/merge.
+
+```tcl
+# Extract pages 2-4 of in.pdf into a new document
+set src [pdfium::open in.pdf]
+set out [pdfium::newdoc]
+pdfium::importpages $out $src "2-4" 0
+pdfium::save $out part.pdf
+pdfium::close $out
+pdfium::close $src
+```
+
+### pdfium::setcropbox / pdfium::setmediabox
+
+```tcl
+pdfium::setcropbox  doc-handle pageindex left bottom right top
+pdfium::setmediabox doc-handle pageindex left bottom right top
+```
+
+Sets the crop/media box of a page (coordinates in points). Returns `1`.
+A vector crop preserves the page content; only the visible box changes.
+
+### pdfium::deletepage
+
+```tcl
+pdfium::deletepage doc-handle index
+```
+
+Removes the page at `index` (0-based). Returns `1`.
+
+### pdfium::setrotation
+
+```tcl
+pdfium::setrotation doc-handle index degrees
+```
+
+Sets the page rotation. `degrees` must be `0`, `90`, `180` or `270`
+(negatives are normalised). Returns `0|1`.
+
+### pdfium::addimagejpeg
+
+```tcl
+pdfium::addimagejpeg page-handle doc-handle jpegfile x y w h
+```
+
+Embeds a JPEG file as an image object on the page, scaled to `w x h`
+points and positioned at `(x,y)` in points. Returns `0|1`.
+
+### pdfium::addimagebitmap
+
+```tcl
+pdfium::addimagebitmap page-handle doc-handle photo x y w h
+```
+
+Embeds a **Tk photo image** losslessly (no JPEG artifacts), scaled to
+`w x h` points at `(x,y)`. Pixels are read via the Tk stub API, so this
+works unchanged on Linux, Windows and macOS. Returns `0|1`.
+
+```tcl
+set photo [pdfium::render $src 0 -dpi 150]
+set k   [expr {72.0 / 150}]
+set wpt [expr {[image width  $photo] * $k}]
+set hpt [expr {[image height $photo] * $k}]
+set doc  [pdfium::newdoc]
+set page [pdfium::newpage $doc 0 $wpt $hpt]
+pdfium::addimagebitmap $page $doc $photo 0 0 $wpt $hpt
+pdfium::generatecontent $page
+pdfium::closepage $page
+pdfium::save $doc out.pdf
+pdfium::close $doc
+```
+
+### pdfium::save
+
+```tcl
+pdfium::save doc-handle filename ?flags?
+```
+
+Writes the document with `FPDF_SaveAsCopy`. `flags` defaults to
+`FPDF_NO_INCREMENTAL` (1 — a clean full rewrite). Returns `0|1`.
+
+### pdfium::savewithversion
+
+```tcl
+pdfium::savewithversion doc-handle filename version ?flags?
+```
+
+Like `save`, but forces the PDF version with `FPDF_SaveWithVersion`.
+`version` is an integer such as `14`..`17` (PDF 1.4 .. 1.7). Returns `0|1`.
 
 ---
 

@@ -3,9 +3,11 @@
 Tcl/Tk binding for PDFium — Google's PDF rendering engine (BSD license).
 
 The first PDFium binding for Tcl. Enables PDF rendering, text extraction,
-metadata, search, bookmarks, and form fields directly from Tcl/Tk.
+metadata, search, bookmarks, form fields and annotations directly from
+Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
+delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.3  
+**Version:** 0.4  
 **License:** BSD  
 **Platform:** Linux x86_64, Windows (experimental via MinGW)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
@@ -13,6 +15,8 @@ metadata, search, bookmarks, and form fields directly from Tcl/Tk.
 ---
 
 ## Features
+
+### Reading
 
 ```tcl
 pdfium::open      filename ?password?  -> doc-handle
@@ -27,7 +31,33 @@ pdfium::meta      doc-handle key       -> string
 pdfium::links     doc-handle pagenum   -> {url ...}
 pdfium::bookmarks doc-handle           -> {{title pagenum level} ...}
 pdfium::formfields doc-handle pagenum  -> {{type name value} ...}
+pdfium::annot_list doc-handle pagenum  -> {{type rect content author date} ...}
 ```
+
+### Writing / editing (0.4)
+
+```tcl
+pdfium::newdoc                                   -> doc-handle (empty)
+pdfium::newpage     doc index width height       -> page-handle   (points)
+pdfium::closepage   page
+pdfium::generatecontent page                     -> 0|1
+pdfium::importpages dest src ?range? ?index?     -> 0|1   range "1,3,5-7" or ""
+pdfium::setcropbox  doc pageindex l b r t        -> 1     (points)
+pdfium::setmediabox doc pageindex l b r t        -> 1     (points)
+pdfium::deletepage  doc index                    -> 1
+pdfium::setrotation doc index degrees            -> 0|1   0|90|180|270
+pdfium::addimagejpeg  page doc jpegfile x y w h  -> 0|1   (points)
+pdfium::addimagebitmap page doc photo x y w h    -> 0|1   (points, lossless)
+pdfium::save           doc filename ?flags?      -> 0|1   default FPDF_NO_INCREMENTAL
+pdfium::savewithversion doc filename version ?flags? -> 0|1   version 14..17
+```
+
+> **Units:** `pagesize` returns millimetres, but every writing command
+> expects **points** (`pt = mm * 72 / 25.4`). Page origin is bottom-left.
+>
+> Encrypted saving and vector/text generation are intentionally left to
+> [pdf4tcl](https://sourceforge.net/projects/pdf4tcl/) — PDFium has no
+> suitable public write API for those.
 
 ---
 
@@ -77,6 +107,31 @@ set img [pdfium::render $doc 0 -dpi 150]
 label .l -image $img
 pack .l
 
+pdfium::close $doc
+```
+
+### Writing example — extract a page region into a new PDF
+
+```tcl
+package require pdfiumtcl
+
+# Render a page region to a Tk photo, then embed it losslessly.
+set src  [pdfium::open in.pdf]
+set photo [pdfium::render $src 0 -dpi 150]   ;# -> Tk photo image
+pdfium::close $src
+
+# A4-sized point box would be {595 842}; here we make a page the
+# image's size in points (150 dpi -> pt factor 72/150).
+set k   [expr {72.0 / 150}]
+set wpt [expr {[image width  $photo] * $k}]
+set hpt [expr {[image height $photo] * $k}]
+
+set doc  [pdfium::newdoc]
+set page [pdfium::newpage $doc 0 $wpt $hpt]
+pdfium::addimagebitmap $page $doc $photo 0 0 $wpt $hpt
+pdfium::generatecontent $page
+pdfium::closepage $page
+pdfium::save $doc out.pdf
 pdfium::close $doc
 ```
 

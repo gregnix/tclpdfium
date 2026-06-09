@@ -318,6 +318,13 @@ install90:
 	$(MAKE) TCL_VERSION=9.0 install
 	$(MAKE) TCL_VERSION=9.0 install-pdfium
 
+# Build + install both Tcl 8.6 and Tcl 9.0 in one go (clean between).
+both:
+	$(MAKE) clean
+	$(MAKE) install
+	$(MAKE) clean
+	$(MAKE) install90
+
 # PDFium-Library ins Subdir kopieren (nach make install ausfuehren)
 install-pdfium:
 	@if [ -f vendor/pdfium/lib/libpdfium.so ]; then \
