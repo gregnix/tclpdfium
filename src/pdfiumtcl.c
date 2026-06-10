@@ -1345,6 +1345,6 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
     Tcl_CreateObjCommand(interp, "pdfium::savewithversion",
                          PdfiumSaveWithVersionCmd, NULL, NULL);
 
-    Tcl_PkgProvide(interp, "pdfiumtcl", "0.4");
+    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5");
     return TCL_OK;
 }
