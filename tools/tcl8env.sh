@@ -8,7 +8,7 @@
 # Danach normal arbeiten:
 #   make
 #   make check
-#   make install    -> ~/lib/tcl8.6/tclpdfium0.4/
+#   make install    -> ~/lib/tcl8.6/tclpdfium0.5/
 
 HOME_DIR="${HOME:-$(getent passwd "$USER" | cut -d: -f6)}"
 
@@ -26,4 +26,4 @@ echo "Kompilieren:"
 echo "  make clean && make"
 echo "  make check"
 echo "  make install"
-echo "  -> $HOME_DIR/lib/tcl8.6/tclpdfium0.4/"
+echo "  -> $HOME_DIR/lib/tcl8.6/tclpdfium0.5/"

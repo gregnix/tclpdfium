@@ -7,7 +7,7 @@
 #
 # Danach normal arbeiten:
 #   make TCL_VERSION=9.0
-#   make install90  -> ~/lib/tcl9.0/tclpdfium0.4/
+#   make install90  -> ~/lib/tcl9.0/tclpdfium0.5/
 
 HOME_DIR="${HOME:-$(getent passwd "$USER" | cut -d: -f6)}"
 
@@ -24,4 +24,4 @@ echo ""
 echo "Kompilieren:"
 echo "  make clean && make TCL_VERSION=9.0"
 echo "  make install90"
-echo "  -> $HOME_DIR/lib/tcl9.0/tclpdfium0.4/"
+echo "  -> $HOME_DIR/lib/tcl9.0/tclpdfium0.5/"

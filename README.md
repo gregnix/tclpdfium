@@ -7,7 +7,7 @@ metadata, search, bookmarks, form fields and annotations directly from
 Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
 delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.4  
+**Version:** 0.5  
 **License:** BSD  
 **Platform:** Linux x86_64, Windows (experimental via MinGW)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
@@ -137,6 +137,37 @@ pdfium::close $doc
 
 ---
 
+## Error handling
+
+`pdfium::open` raises a catchable Tcl error when a file cannot be loaded. The
+message is `cannot open PDF '<file>' (PDFium error N)`, where `N` is the PDFium
+error code:
+
+| N | Meaning |
+|---|---------|
+| 1 | Unknown error |
+| 2 | File not found / cannot be opened |
+| 3 | Not a PDF or corrupted |
+| 4 | Password required or incorrect |
+| 5 | Unsupported security scheme |
+| 6 | Page not found / content error |
+
+PDFium reads **PDF only**. A PostScript/EPS file (`%!PS...`, e.g. `pcal` output)
+fails with error 3 even when it has a `.pdf` name — convert it first (e.g.
+`ps2pdf in.ps out.pdf`). Wrap calls in `catch` and branch on the code:
+
+```tcl
+if {[catch {pdfium::open $f} doc]} {
+    if {[string match {*error 4*} $doc]} {
+        set doc [pdfium::open $f $password]   ;# encrypted: retry with password
+    } else {
+        puts stderr $doc                      ;# 2 = missing, 3 = not a PDF, ...
+    }
+}
+```
+
+---
+
 ## Viewer
 
 ```bash
@@ -152,7 +183,7 @@ tclpdfium/
   Makefile
   pkgIndex.tcl
   src/              C source code (pdfiumtcl.c)
-  app/              Tcl applications (viewer.tcl, ppdtool.tcl)
+  app/              Tcl applications (viewer.tcl, viewer2.tcl)
   scripts/          Shell scripts (setup.sh, createpdf.sh)
   examples/         Example scripts
   docs/             Documentation
@@ -168,7 +199,7 @@ tclpdfium/
 ## Platform Notes
 
 - **Linux x86_64:** fully supported, tested on Tcl 8.6 and 9.0
-- **Windows:** experimental via MinGW/BAWT (see `docs/en/windows-build.md`)
+- **Windows:** experimental via MinGW/BAWT (see `scripts/build-win.sh`)
 - **macOS:** not yet tested
 - **Stub-based:** runs without recompiling on any Tcl 8.5+
 

@@ -1,7 +1,7 @@
-# Makefile fuer pdfiumtcl 0.4
+# Makefile fuer pdfiumtcl 0.5
 #
 # Paketstruktur (analog zu sha-2.2.0):
-#   tclpdfium0.4/
+#   tclpdfium0.5/
 #     pkgIndex.tcl
 #     linux64/          pdfiumtcl.so + libpdfium.so
 #     linux64-tcl9/     pdfiumtcl.so + libpdfium.so
@@ -12,8 +12,8 @@
 #   make                      Linux, Tcl 8.6
 #   make TCL_VERSION=9.0      Linux, Tcl 9
 #   make PLATFORM=windows     Windows cross-compile (mingw64)
-#   make install              -> ~/lib/tcltk/tclpdfium0.4/linux64/
-#   make install90            -> ~/lib/tcltk/tclpdfium0.4/linux64-tcl9/
+#   make install              -> ~/lib/tcltk/tclpdfium0.5/linux64/
+#   make install90            -> ~/lib/tcltk/tclpdfium0.5/linux64-tcl9/
 #   make install-windows      -> WIN_INSTALL_DIR/windows64/
 #   make install-pdfium       libpdfium.so/pdfium.dll ins Paketverzeichnis
 #   make both                 Tcl 8.6 + Tcl 9 bauen
@@ -211,10 +211,10 @@ endif
 
 SRC = src/pdfiumtcl.c
 
-PKGVERSION   = 0.4
+PKGVERSION   = 0.5
 PKGNAME      = tclpdfium$(PKGVERSION)
 # Gemeinsames Installverzeichnis fuer alle Plattformen:
-INSTALL_BASE = $(HOME)/lib/tcltk/$(PKGNAME)
+INSTALL_BASE = $(CURDIR)/out/$(PKGNAME)
 INSTALL_DIR  = $(INSTALL_BASE)/$(SUBDIR)
 
 # Windows

@@ -115,8 +115,8 @@ before switching between Tcl versions.
 
 | Version | Command | Target |
 |---------|---------|--------|
-| Tcl 8.6 | `make install` | `~/lib/share/tcltk/tclpdfium0.4/` |
-| Tcl 9.0 | `make install90` | `~/lib/share/tcl9.0/tclpdfium0.4/` |
+| Tcl 8.6 | `make install` | `~/lib/share/tcltk/tclpdfium0.5/` |
+| Tcl 9.0 | `make install90` | `~/lib/share/tcl9.0/tclpdfium0.5/` |
 
 ---
 
@@ -137,6 +137,5 @@ Key compatibility details in `src/pdfiumtcl.c`:
 
 ## Next Steps
 
-- [API Reference](api-reference.md) — all 12 commands
-- [todo.md](../todo.md) — roadmap
-- [feature-matrix.md](../feature-matrix.md) — comparison table
+- [API Reference](api-reference.md) — all 26 commands
+- [README](../../README.md) — overview, install, examples

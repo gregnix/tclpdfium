@@ -1,6 +1,6 @@
 # pdfiumtcl API Reference
 
-Version: 0.4
+Version: 0.5
 
 ---
 
@@ -400,6 +400,41 @@ pdfium::savewithversion doc-handle filename version ?flags?
 
 Like `save`, but forces the PDF version with `FPDF_SaveWithVersion`.
 `version` is an integer such as `14`..`17` (PDF 1.4 .. 1.7). Returns `0|1`.
+
+---
+
+## Errors
+
+`pdfium::open` raises a catchable Tcl error on failure. The error message is
+`cannot open PDF '<file>' (PDFium error N)` with `N` from `FPDF_GetLastError`:
+
+| N | Constant | Meaning |
+|---|----------|---------|
+| 1 | `FPDF_ERR_UNKNOWN`  | Unknown error |
+| 2 | `FPDF_ERR_FILE`     | File not found or cannot be opened |
+| 3 | `FPDF_ERR_FORMAT`   | Not in PDF format or corrupted |
+| 4 | `FPDF_ERR_PASSWORD` | Password required or incorrect |
+| 5 | `FPDF_ERR_SECURITY` | Unsupported security scheme |
+| 6 | `FPDF_ERR_PAGE`     | Page not found or content error |
+
+Notes:
+
+- PDFium reads **PDF only**. A PostScript/EPS file (starts with `%!PS`, e.g.
+  `pcal` output) yields error 3 even with a `.pdf` name — convert it first
+  (`ps2pdf in.ps out.pdf`).
+- Structurally broken PDFs (bad xref, junk before `%PDF`) also yield error 3;
+  rewriting them with `qpdf in.pdf out.pdf` often makes them loadable.
+- Encrypted files yield error 4 — re-open with the password argument.
+
+```tcl
+if {[catch {pdfium::open $f} doc]} {
+    if {[string match {*error 4*} $doc]} {
+        set doc [pdfium::open $f $password]
+    } else {
+        error "open failed: $doc"
+    }
+}
+```
 
 ---
 

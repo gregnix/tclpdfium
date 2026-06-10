@@ -1,7 +1,7 @@
 #!/usr/bin/env tclsh
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Gregor Ebbing
-# viewer.tcl  --  PDF-Viewer auf Basis von pdfiumtcl \u2014 Version 0.4
+# viewer.tcl  --  PDF-Viewer auf Basis von pdfiumtcl \u2014 Version 0.5
 #
 # Aufruf:  tclsh viewer.tcl datei.pdf
 
