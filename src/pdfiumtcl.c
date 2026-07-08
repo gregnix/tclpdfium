@@ -150,10 +150,26 @@ PdfiumPageCountCmd(ClientData cd, Tcl_Interp *interp,
 /* -width px: Zielbreite in Pixeln; DPI wird automatisch berechnet.   */
 /* -dpi und -width schließen sich aus; -width hat Vorrang.            */
 /* ------------------------------------------------------------------ */
+/* Vorwaerts-Deklaration: portable UTF-16LE -> Tcl_Obj (Definition weiter unten). */
+static Tcl_Obj *_AnnotUtf16ToObj(Tcl_Interp *interp, unsigned short *buf, unsigned long bytelen);
+
+/* Tk nur fuer render: Stubs lazy initialisieren, damit das Laden kein Tk zieht. */
+static int
+EnsureTk(Tcl_Interp *interp)
+{
+#if TCL_MAJOR_VERSION >= 9
+    if (Tk_InitStubs(interp, "9.0", 0) == NULL) return TCL_ERROR;
+#else
+    if (Tk_InitStubs(interp, "8.5", 0) == NULL) return TCL_ERROR;
+#endif
+    return TCL_OK;
+}
+
 static int
 PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
                 int objc, Tcl_Obj *const objv[])
 {
+    if (EnsureTk(interp) != TCL_OK) return TCL_ERROR;
     if (objc < 3) {
         Tcl_WrongNumArgs(interp, 1, objv,
                          "doc-handle pagenum ?-dpi n? ?-width px? ?-imagename name?");
@@ -324,7 +340,7 @@ PdfiumGetTextCmd(ClientData cd, Tcl_Interp *interp,
     buf16[nchars] = 0;
 
     /* UTF-16LE → Tcl-String (Tcl verwendet intern Unicode) */
-    Tcl_Obj *result = Tcl_NewUnicodeObj((Tcl_UniChar *)buf16, nchars);
+    Tcl_Obj *result = _AnnotUtf16ToObj(interp, (unsigned short *)buf16, (unsigned long)((nchars + 1) * 2));
     Tcl_SetObjResult(interp, result);
 
     ckfree((char *)buf16);
@@ -408,7 +424,7 @@ PdfiumMetaCmd(ClientData cd, Tcl_Interp *interp,
     int nchars = (int)((len / 2) - 1);
     if (nchars < 0) nchars = 0;
 
-    Tcl_Obj *result = Tcl_NewUnicodeObj((Tcl_UniChar *)buf, nchars);
+    Tcl_Obj *result = _AnnotUtf16ToObj(interp, (unsigned short *)buf, (unsigned long)len);
     Tcl_SetObjResult(interp, result);
     ckfree((char *)buf);
     return TCL_OK;
@@ -476,11 +492,20 @@ PdfiumSearchCmd(ClientData cd, Tcl_Interp *interp,
             Tcl_GetIntFromObj(interp, objv[5], &casesensitive);
     }
 
-    /* Suchbegriff als UTF-16LE */
+    /* Suchbegriff als UTF-16LE -- portabel (Tcl 8 + 9); NICHT
+       Tcl_GetUnicodeFromObj (Tcl_UniChar ist in Tcl 9 32-bit). */
     const char *term_utf8 = Tcl_GetString(objv[3]);
-    Tcl_Obj *termObj = Tcl_NewStringObj(term_utf8, -1);
-    Tcl_Size termlen;
-    Tcl_UniChar *termUni = Tcl_GetUnicodeFromObj(termObj, &termlen);
+    Tcl_DString termDs;
+    Tcl_DStringInit(&termDs);
+    Tcl_Encoding tenc = Tcl_GetEncoding(NULL, "utf-16le");
+    if (!tenc) tenc = Tcl_GetEncoding(NULL, "unicode");
+    if (tenc) {
+        Tcl_UtfToExternalDString(tenc, term_utf8, -1, &termDs);
+        Tcl_FreeEncoding(tenc);
+    }
+    { char _z[2] = {0,0}; Tcl_DStringAppend(&termDs, _z, 2); }
+    const unsigned short *termUni =
+        (const unsigned short *)Tcl_DStringValue(&termDs);
 
     FPDF_DOCUMENT  doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
     FPDF_PAGE      page = FPDF_LoadPage(doc, pagenum);
@@ -504,7 +529,7 @@ PdfiumSearchCmd(ClientData cd, Tcl_Interp *interp,
     FPDFText_FindClose(sh);
     FPDFText_ClosePage(tp);
     FPDF_ClosePage(page);
-    Tcl_DecrRefCount(termObj);
+    Tcl_DStringFree(&termDs);
 
     Tcl_SetObjResult(interp, result);
     return TCL_OK;
@@ -549,7 +574,7 @@ PdfiumLinksCmd(ClientData cd, Tcl_Interp *interp,
             FPDFLink_GetURL(pl, i, buf, len);
             int nchars = len - 1;
             if (nchars < 0) nchars = 0;
-            Tcl_Obj *url = Tcl_NewUnicodeObj((Tcl_UniChar *)buf, nchars);
+            Tcl_Obj *url = _AnnotUtf16ToObj(interp, (unsigned short *)buf, (unsigned long)(len * 2));
             Tcl_ListObjAppendElement(interp, result, url);
             ckfree((char *)buf);
         }
@@ -688,7 +713,7 @@ PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
         FPDFAnnot_GetStringValue(annot, "T", nbuf, nlen);
         int nnchars = (int)((nlen / 2) - 1);
         if (nnchars < 0) nnchars = 0;
-        Tcl_Obj *name = Tcl_NewUnicodeObj((Tcl_UniChar *)nbuf, nnchars);
+        Tcl_Obj *name = _AnnotUtf16ToObj(interp, (unsigned short *)nbuf, (unsigned long)nlen);
         ckfree((char *)nbuf);
 
         /* Feldwert */
@@ -699,7 +724,7 @@ PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
             FPDFAnnot_GetStringValue(annot, "V", vbuf, vlen);
             int vnchars = (int)((vlen / 2) - 1);
             if (vnchars < 0) vnchars = 0;
-            value = Tcl_NewUnicodeObj((Tcl_UniChar *)vbuf, vnchars);
+            value = _AnnotUtf16ToObj(interp, (unsigned short *)vbuf, (unsigned long)vlen);
             ckfree((char *)vbuf);
         } else {
             value = Tcl_NewStringObj("", 0);
@@ -1280,11 +1305,10 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
     /* Stubs initialisieren -- Tcl 9 braucht "9.0", Tcl 8 "8.5" */
 #if TCL_MAJOR_VERSION >= 9
     if (Tcl_InitStubs(interp, "9.0", 0) == NULL) return TCL_ERROR;
-    if (Tk_InitStubs(interp,  "9.0", 0) == NULL) return TCL_ERROR;
 #else
     if (Tcl_InitStubs(interp, "8.5", 0) == NULL) return TCL_ERROR;
-    if (Tk_InitStubs(interp,  "8.5", 0) == NULL) return TCL_ERROR;
 #endif
+    /* Tk-Stubs NICHT hier -- nur pdfium::render braucht Tk (lazy in EnsureTk). */
 
     FPDF_InitLibrary();
 
@@ -1345,6 +1369,6 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
     Tcl_CreateObjCommand(interp, "pdfium::savewithversion",
                          PdfiumSaveWithVersionCmd, NULL, NULL);
 
-    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5");
+    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5.1");
     return TCL_OK;
 }

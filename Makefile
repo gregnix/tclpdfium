@@ -1,7 +1,7 @@
-# Makefile fuer pdfiumtcl 0.5
+# Makefile fuer pdfiumtcl 0.5.1
 #
 # Paketstruktur (analog zu sha-2.2.0):
-#   tclpdfium0.5/
+#   tclpdfium0.5.1/
 #     pkgIndex.tcl
 #     linux64/          pdfiumtcl.so + libpdfium.so
 #     linux64-tcl9/     pdfiumtcl.so + libpdfium.so
@@ -12,8 +12,8 @@
 #   make                      Linux, Tcl 8.6
 #   make TCL_VERSION=9.0      Linux, Tcl 9
 #   make PLATFORM=windows     Windows cross-compile (mingw64)
-#   make install              -> ~/lib/tcltk/tclpdfium0.5/linux64/
-#   make install90            -> ~/lib/tcltk/tclpdfium0.5/linux64-tcl9/
+#   make install              -> ~/lib/tcltk/tclpdfium0.5.1/linux64/
+#   make install90            -> ~/lib/tcltk/tclpdfium0.5.1/linux64-tcl9/
 #   make install-windows      -> WIN_INSTALL_DIR/windows64/
 #   make install-pdfium       libpdfium.so/pdfium.dll ins Paketverzeichnis
 #   make both                 Tcl 8.6 + Tcl 9 bauen
@@ -106,11 +106,15 @@ ifeq ($(TCL_VERSION),9.0)
         TCL_INC    := -I$(WIN_TCL_ROOT)/include -I$(MSYS2_PREFIX)/include
         TK_INC     := -I$(WIN_TCL_ROOT)/include -I$(MSYS2_PREFIX)/include
         TCL_STUBLIB := $(firstword $(wildcard \
+            $(WIN_TCL_ROOT)/lib/libtclstub.a \
+            $(WIN_TCL_ROOT)/lib/tclstub.lib \
             $(WIN_TCL_ROOT)/lib/libtclstub90.a \
             $(WIN_TCL_ROOT)/lib/tclstub90.lib \
             $(MSYS2_PREFIX)/lib/libtclstub9.0.a \
             /mingw64/lib/libtclstub9.0.a))
         TK_STUBLIB  := $(firstword $(wildcard \
+            $(WIN_TCL_ROOT)/lib/libtkstub.a \
+            $(WIN_TCL_ROOT)/lib/tkstub.lib \
             $(WIN_TCL_ROOT)/lib/libtkstub90.a \
             $(WIN_TCL_ROOT)/lib/tkstub90.lib \
             $(MSYS2_PREFIX)/lib/libtkstub9.0.a \
@@ -211,7 +215,7 @@ endif
 
 SRC = src/pdfiumtcl.c
 
-PKGVERSION   = 0.5
+PKGVERSION   = 0.5.1
 PKGNAME      = tclpdfium$(PKGVERSION)
 # Gemeinsames Installverzeichnis fuer alle Plattformen:
 INSTALL_BASE = $(CURDIR)/out/$(PKGNAME)

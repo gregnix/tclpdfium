@@ -1,7 +1,7 @@
 # Installing tclpdfium
 
 Build and install the `pdfiumtcl` package (the PDFium binding for Tcl/Tk,
-version 0.4). PDFium itself is **not** in the repository — it is downloaded by
+version 0.5). PDFium itself is **not** in the repository — it is downloaded by
 `scripts/setup.sh` from
 [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries).
 
@@ -67,16 +67,16 @@ the built `pdfiumtcl.so`/`pdfiumtcl.dll`.
 ## 4. Install
 
 ```bash
-make install              # Tcl 8.6  -> out/tclpdfium0.4/linux64/
-make install90            # Tcl 9.0  -> out/tclpdfium0.4/linux64-tcl9/
+make install              # Tcl 8.6  -> out/tclpdfium0.5/linux64/
+make install90            # Tcl 9.0  -> out/tclpdfium0.5/linux64-tcl9/
 make both                 # clean + install (8.6) + clean + install90 (9.0)
 ```
 
 Each `install` target creates the per-platform package tree under
-`out/tclpdfium0.4/`:
+`out/tclpdfium0.5/`:
 
 ```
-out/tclpdfium0.4/
+out/tclpdfium0.5/
   pkgIndex.tcl                 # selects the subdir at load time
   linux64/                     # Tcl 8.x
     pdfiumtcl.so
@@ -97,7 +97,7 @@ The subdirectory is chosen by the build:
 
 `pkgIndex.tcl` picks the right subdirectory at runtime from
 `tcl_platform(platform)`, `tcl_platform(pointerSize)` and the Tcl version, so
-one `tclpdfium0.4/` tree can hold several platforms side by side.
+one `tclpdfium0.5/` tree can hold several platforms side by side.
 
 `make install` also runs `install-pdfium`, copying `libpdfium.so` (or
 `pdfium.dll`) from `vendor/pdfium/` into the subdirectory next to the binding.
@@ -107,7 +107,7 @@ one `tclpdfium0.4/` tree can hold several platforms side by side.
 ## Using it
 
 Point Tcl at the package directory and require it. Either add the directory
-that *contains* `tclpdfium0.4/` to `auto_path`/`TCLLIBPATH`, or the module
+that *contains* `tclpdfium0.5/` to `auto_path`/`TCLLIBPATH`, or the module
 tree via `tcl::tm::path`:
 
 ```bash
@@ -174,13 +174,54 @@ make dist-windows                               # collect into dist-win/windows6
 
 ### Native on Windows (BAWT / MinGW)
 
-In `cmd.exe`, with the BAWT MinGW gcc on `PATH`:
+This is the path for building against a BAWT "Batteries Included" tree. It
+needs **no `make`** — `build-tclpdfium-bawt.bat` calls `gcc` directly with
+the exact flags from this Makefile.
+
+Prerequisites:
+
+- BAWT's MinGW gcc, extracted from `gcc14.2.0_x86_64-w64-mingw32.7z`; the
+  compiler is `...\mingw64\bin\gcc.exe`.
+- The PDFium SDK under `vendor\pdfium\` (`include\`, `lib\pdfium.dll.lib`,
+  `bin\pdfium.dll`); run `bash scripts/setup.sh PDFIUM_PLATFORM=win-x64` if absent.
+- One BAWT `...\Development\opt\tcl` tree per Tcl version. Each supplies
+  `include\tcl.h` + `tk.h` and the stub libraries.
+
+> **BAWT stub naming.** BAWT ships the **Tcl 8.6** stubs *versioned*
+> (`libtclstub86.a`, `libtkstub86.a`) but the **Tcl 9** stubs *unversioned*
+> (`libtclstub.a`, `libtkstub.a`, and `tclstub.lib`, `tkstub.lib`) — the
+> Tcl 9 convention. The Makefile's 9.0 Windows wildcard matches both spellings.
+
+Edit the six `CONFIG` lines at the top of `build-tclpdfium-bawt.bat`
+(gcc path, C source, PDFium dir, project root, the two `opt\tcl` trees), then:
 
 ```bat
-set GCCBIN=C:\Bawt\Bawt86\Tools\gcc14.2.0_x86_64-w64-mingw32\mingw64\bin
-set PATH=%GCCBIN%;%PATH%
-mingw32-make windows-bawt        :: Tcl 8.6
-mingw32-make windows-bawt90      :: Tcl 9.0
+build-tclpdfium-bawt.bat
+```
+
+It builds Tcl 9.0 and 8.6 and drops a ready-to-use package into the project
+layout — one flat folder per OS/Tcl combo, each with a one-line `pkgIndex.tcl`:
+
+```
+<PROJ>\libs\windows-tcl9.0\tclpdfium\   pdfiumtcl.dll + pdfium.dll + pkgIndex.tcl
+<PROJ>\libs\windows-tcl8.6\tclpdfium\   pdfiumtcl.dll + pdfium.dll + pkgIndex.tcl
+```
+
+Verify it loads (Tk must be present — `Pdfiumtcl_Init` calls `Tk_InitStubs`):
+
+```tcl
+cd C:/.../libs/windows-tcl9.0/tclpdfium
+lappend auto_path [pwd]
+package require Tk
+package require pdfiumtcl      ;# -> 0.5
+```
+
+If you do have GNU `make` / `mingw32-make`, the Makefile builds the same
+binary directly (BAWT MinGW gcc on `PATH`):
+
+```bat
+mingw32-make PLATFORM=windows TCL_VERSION=9.0 ^
+    WIN_TCL_ROOT=C:/Bawt/Bawt903/Windows/x64/Development/opt/tcl
 ```
 
 ### Install on Windows
@@ -189,7 +230,7 @@ mingw32-make windows-bawt90      :: Tcl 9.0
 make install-windows             # -> WIN_INSTALL_DIR/<subdir>/
 ```
 
-`WIN_INSTALL_DIR` defaults to `WIN_TCL_ROOT/lib/tclpdfium0.4`. The
+`WIN_INSTALL_DIR` defaults to `WIN_TCL_ROOT/lib/tclpdfium0.5`. The
 `pdfium.dll` is copied next to `pdfiumtcl.dll` in the subdirectory so the
 Windows loader can resolve it.
 
@@ -204,7 +245,7 @@ Windows loader can resolve it.
 - **`package require pdfiumtcl` cannot load the library** — make sure the
   `pdfium` shared library sits in the same subdirectory as `pdfiumtcl.*`
   (`install-pdfium` does this), and that the directory containing
-  `tclpdfium0.4/` is on `auto_path`/`TCLLIBPATH`.
+  `tclpdfium0.5/` is on `auto_path`/`TCLLIBPATH`.
 - **`cannot open PDF '...' (PDFium error 3)`** — the file is not a valid PDF
   (corrupt, or actually PostScript/EPS such as `pcal` output). PDFium reads
   PDF only; convert first (`ps2pdf in.ps out.pdf`) or rewrite a broken PDF

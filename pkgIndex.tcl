@@ -10,7 +10,7 @@
 # auf Windows (MSVC/Magicsplat) ist wordSize=4 auch bei 64-bit Tcl
 # (LLP64-Modell), pointerSize=8 ist der zuverlaessige 64-bit Indikator.
 
-set _ver  0.5
+set _ver  0.5.1
 set _bits 64
 if {$::tcl_platform(pointerSize) == 4} { set _bits 32 }
 
