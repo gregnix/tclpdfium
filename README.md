@@ -7,9 +7,9 @@ metadata, search, bookmarks, form fields and annotations directly from
 Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
 delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.5.1  
+**Version:** 0.5.2  
 **License:** BSD  
-**Platform:** Linux x86_64, Windows (experimental via MinGW)  
+**Platform:** Linux x86_64, Windows x64 (MinGW, cross-built or native)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
 
 ---
@@ -34,10 +34,11 @@ pdfium::formfields doc-handle pagenum  -> {{type name value} ...}
 pdfium::annot_list doc-handle pagenum  -> {{type rect content author date} ...}
 ```
 
-> **Tk is only needed for `render`.** Since 0.5.1, Tk is loaded lazily: only
-> `pdfium::render` (which returns a Tk photo image) pulls it in. Every other
-> command is Tk-free, so `package require pdfiumtcl` works in a plain `tclsh`
-> without opening a window or entering the Tk event loop.
+> **Tk is only needed for `render` and `addimagebitmap`.** Both work on Tk photo
+> images — one writes into a photo, the other reads from one. Tk is loaded
+> lazily: neither `package require pdfiumtcl` nor any other command pulls it in.
+> The binding therefore works in a plain `tclsh`, with no window and no event
+> loop.
 
 ### Writing / editing (0.4)
 
@@ -204,13 +205,41 @@ tclpdfium/
 ## Platform Notes
 
 - **Linux x86_64:** fully supported, tested on Tcl 8.6 and 9.0
-- **Windows:** experimental via MinGW/BAWT (see `scripts/build-win.sh`)
+- **Windows x64:** cross-built on Linux (`make dist-windows`, `make dist-windows90`)
+  or natively via BAWT/MSYS2 — Tcl 8.6 and 9.0
 - **macOS:** not yet tested
-- **Stub-based:** runs without recompiling on any Tcl 8.5+
+- **Stub-based:** one binary per Tcl major version; no `libtcl`/`libtk` link
+- **Starpack-ready:** loads from a VFS without leaving `libpdfium` behind
 
 ---
 
 ## Changes
+
+### 0.5.2
+
+- **Crash fixed in `addimagebitmap`** — the command read a Tk photo without ever
+  calling `Tk_InitStubs`. `tkStubsPtr` was NULL, and calling it before any
+  `pdfium::render` killed the process with no message. It now initializes Tk
+  lazily, exactly like `render` does, and reports a normal Tcl error when Tk is
+  unavailable.
+- **Commands registered with fully qualified names** (`::pdfium::open` instead of
+  `pdfium::open`). The unqualified form is resolved against the *current*
+  namespace; loading the package from inside a proc silently put all 26 commands
+  into `::pdfium::pdfium::`. This never surfaced while `package ifneeded` loaded
+  at global level — the new VFS-aware loader does not.
+- **`pkgIndex.tcl` works inside a starpack.** Tcl copies only the directly loaded
+  library out of a VFS, leaving `libpdfium` behind; on Linux the `$ORIGIN`
+  runpath then points at the temp directory. The loader now unpacks *both*
+  libraries into one directory and loads from there, so a starpack stays a single
+  file. `TCLPDFIUM_TMPDIR` redirects the unpack directory when `/tmp` is `noexec`.
+- **Windows / Tcl 9 cross-build works.** `make dist-windows90` no longer bails
+  out: `tools/make-win-stubs.sh` compiles the Tcl and Tk stub libraries from
+  source (two C files) for the MinGW toolchain. No MSYS2 `tcl9` package and no
+  Windows machine required.
+- **`scripts/get-pdfium.cmd`** — PDFium download for cmd.exe, using the `curl.exe`
+  and `tar.exe` that ship with Windows. `setup.sh` needs a shell; this does not.
+- **PDFium now lands in `vendor/pdfium-<platform>/`** so the Linux and Windows
+  SDKs can coexist in one tree, which the cross-build requires.
 
 ### 0.5.1
 

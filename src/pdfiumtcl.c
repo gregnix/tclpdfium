@@ -1169,6 +1169,9 @@ static int
 PdfiumAddImageBitmapCmd(ClientData cd, Tcl_Interp *interp,
                         int objc, Tcl_Obj *const objv[])
 {
+    /* Reads a Tk photo -- Tk stubs must be live, or Tk_FindPhoto dereferences
+     * a NULL tkStubsPtr and the process dies. Same lazy init as render. */
+    if (EnsureTk(interp) != TCL_OK) return TCL_ERROR;
     if (objc != 8) {
         Tcl_WrongNumArgs(interp, 1, objv, "page-handle doc-handle photo x y w h");
         return TCL_ERROR;
@@ -1312,63 +1315,63 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
 
     FPDF_InitLibrary();
 
-    Tcl_Eval(interp, "namespace eval pdfium {}");
+    Tcl_Eval(interp, "namespace eval ::pdfium {}");
 
-    Tcl_CreateObjCommand(interp, "pdfium::open",
+    Tcl_CreateObjCommand(interp, "::pdfium::open",
                          PdfiumOpenCmd,       NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::close",
+    Tcl_CreateObjCommand(interp, "::pdfium::close",
                          PdfiumCloseCmd,      NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::pagecount",
+    Tcl_CreateObjCommand(interp, "::pdfium::pagecount",
                          PdfiumPageCountCmd,  NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::render",
+    Tcl_CreateObjCommand(interp, "::pdfium::render",
                          PdfiumRenderCmd,     NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::gettext",
+    Tcl_CreateObjCommand(interp, "::pdfium::gettext",
                          PdfiumGetTextCmd,    NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::pagesize",
+    Tcl_CreateObjCommand(interp, "::pdfium::pagesize",
                          PdfiumPageSizeCmd,   NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::meta",
+    Tcl_CreateObjCommand(interp, "::pdfium::meta",
                          PdfiumMetaCmd,       NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::rotation",
+    Tcl_CreateObjCommand(interp, "::pdfium::rotation",
                          PdfiumRotationCmd,   NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::search",
+    Tcl_CreateObjCommand(interp, "::pdfium::search",
                          PdfiumSearchCmd,     NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::links",
+    Tcl_CreateObjCommand(interp, "::pdfium::links",
                          PdfiumLinksCmd,      NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::bookmarks",
+    Tcl_CreateObjCommand(interp, "::pdfium::bookmarks",
                          PdfiumBookmarksCmd,  NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::formfields",
+    Tcl_CreateObjCommand(interp, "::pdfium::formfields",
                          PdfiumFormFieldsCmd, NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::annot_list",
+    Tcl_CreateObjCommand(interp, "::pdfium::annot_list",
                          PdfiumAnnotListCmd,  NULL, NULL);
 
     /* --- write / edit (0.4) --- */
-    Tcl_CreateObjCommand(interp, "pdfium::newdoc",
+    Tcl_CreateObjCommand(interp, "::pdfium::newdoc",
                          PdfiumNewDocCmd,          NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::newpage",
+    Tcl_CreateObjCommand(interp, "::pdfium::newpage",
                          PdfiumNewPageCmd,         NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::closepage",
+    Tcl_CreateObjCommand(interp, "::pdfium::closepage",
                          PdfiumClosePageCmd,       NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::generatecontent",
+    Tcl_CreateObjCommand(interp, "::pdfium::generatecontent",
                          PdfiumGenerateContentCmd, NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::importpages",
+    Tcl_CreateObjCommand(interp, "::pdfium::importpages",
                          PdfiumImportPagesCmd,     NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::setcropbox",
+    Tcl_CreateObjCommand(interp, "::pdfium::setcropbox",
                          PdfiumSetCropBoxCmd,      NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::setmediabox",
+    Tcl_CreateObjCommand(interp, "::pdfium::setmediabox",
                          PdfiumSetMediaBoxCmd,     NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::addimagejpeg",
+    Tcl_CreateObjCommand(interp, "::pdfium::addimagejpeg",
                          PdfiumAddImageJpegCmd,    NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::addimagebitmap",
+    Tcl_CreateObjCommand(interp, "::pdfium::addimagebitmap",
                          PdfiumAddImageBitmapCmd,  NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::deletepage",
+    Tcl_CreateObjCommand(interp, "::pdfium::deletepage",
                          PdfiumDeletePageCmd,      NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::setrotation",
+    Tcl_CreateObjCommand(interp, "::pdfium::setrotation",
                          PdfiumSetRotationCmd,     NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::save",
+    Tcl_CreateObjCommand(interp, "::pdfium::save",
                          PdfiumSaveCmd,            NULL, NULL);
-    Tcl_CreateObjCommand(interp, "pdfium::savewithversion",
+    Tcl_CreateObjCommand(interp, "::pdfium::savewithversion",
                          PdfiumSaveWithVersionCmd, NULL, NULL);
 
-    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5.1");
+    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5.2");
     return TCL_OK;
 }

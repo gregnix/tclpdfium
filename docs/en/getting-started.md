@@ -115,8 +115,8 @@ before switching between Tcl versions.
 
 | Version | Command | Target |
 |---------|---------|--------|
-| Tcl 8.6 | `make install` | `~/lib/share/tcltk/tclpdfium0.5/` |
-| Tcl 9.0 | `make install90` | `~/lib/share/tcl9.0/tclpdfium0.5/` |
+| Tcl 8.6 | `make install` | `~/lib/share/tcltk/tclpdfium0.5.2/` |
+| Tcl 9.0 | `make install90` | `~/lib/share/tcl9.0/tclpdfium0.5.2/` |
 
 ---
 

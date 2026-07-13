@@ -1,6 +1,6 @@
 # pdfiumtcl API Reference
 
-Version: 0.5.1
+Version: 0.5.2
 
 ---
 
@@ -88,7 +88,7 @@ pdfium::render doc-handle pagenum ?options?
 
 Renders a page as a Tk photo image. Returns the image name.
 
-> **This is the only command that needs Tk.** Since 0.5.1 Tk is initialized
+> **This command needs Tk** (as does `pdfium::addimagebitmap`). Tk is initialized
 > lazily on the first `render` call, so under a plain `tclsh` this pulls in Tk
 > (and its event loop) — end such scripts with `exit`, or use `wish`.
 

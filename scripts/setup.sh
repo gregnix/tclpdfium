@@ -11,13 +11,21 @@
 #   Windows x64   -> pdfium-win-x64.tgz (fuer Cross-Compile)
 #
 # Manuell:
-#   PDFIUM_PLATFORM=windows bash scripts/setup.sh
+#   PDFIUM_PLATFORM=win-x64 bash scripts/setup.sh
+#
+# Ziel ist vendor/pdfium-<plattform>/ -- Linux und Windows koennen damit
+# nebeneinander liegen, was der Cross-Compile braucht.
+#
+# Unter Windows ohne bash: scripts\get-pdfium.cmd verwenden.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
-VENDOR_DIR="$ROOT_DIR/vendor/pdfium"
+# Plattformspezifisches Zielverzeichnis. Nur so koennen Linux- und
+# Windows-PDFium im selben Baum nebeneinander liegen -- was der Cross-Compile
+# braucht. vendor/pdfium bleibt als Fallback im Makefile erhalten.
+VENDOR_DIR=""   # weiter unten gesetzt, sobald PLATFORM feststeht
 BASE_URL="https://github.com/bblanchon/pdfium-binaries/releases/latest/download"
 
 # Plattform ermitteln
@@ -46,6 +54,8 @@ else
     esac
 fi
 
+VENDOR_DIR="$ROOT_DIR/vendor/pdfium-${PLATFORM}"
+
 # Dateinamen und erwartete Library
 ARCHIVE="pdfium-${PLATFORM}.tgz"
 URL="$BASE_URL/$ARCHIVE"
@@ -65,7 +75,7 @@ echo ""
 # Pruefen ob bereits vorhanden
 if [ -f "$VENDOR_DIR/$LIB" ]; then
     echo "OK: PDFium bereits vorhanden ($LIB) — ueberspringe Download."
-    echo "    Zum Neuinstallieren: rm -rf vendor/pdfium/lib vendor/pdfium/bin vendor/pdfium/include"
+    echo "    Zum Neuinstallieren: rm -rf $VENDOR_DIR"
     exit 0
 fi
 

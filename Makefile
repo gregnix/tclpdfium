@@ -1,7 +1,7 @@
-# Makefile fuer pdfiumtcl 0.5.1
+# Makefile fuer pdfiumtcl 0.5.2
 #
 # Paketstruktur (analog zu sha-2.2.0):
-#   tclpdfium0.5.1/
+#   tclpdfium0.5.2/
 #     pkgIndex.tcl
 #     linux64/          pdfiumtcl.so + libpdfium.so
 #     linux64-tcl9/     pdfiumtcl.so + libpdfium.so
@@ -12,8 +12,8 @@
 #   make                      Linux, Tcl 8.6
 #   make TCL_VERSION=9.0      Linux, Tcl 9
 #   make PLATFORM=windows     Windows cross-compile (mingw64)
-#   make install              -> ~/lib/tcltk/tclpdfium0.5.1/linux64/
-#   make install90            -> ~/lib/tcltk/tclpdfium0.5.1/linux64-tcl9/
+#   make install              -> ~/lib/tcltk/tclpdfium0.5.2/linux64/
+#   make install90            -> ~/lib/tcltk/tclpdfium0.5.2/linux64-tcl9/
 #   make install-windows      -> WIN_INSTALL_DIR/windows64/
 #   make install-pdfium       libpdfium.so/pdfium.dll ins Paketverzeichnis
 #   make both                 Tcl 8.6 + Tcl 9 bauen
@@ -72,17 +72,34 @@ endif
 TARGET = $(BINARY_NAME)
 
 # ------------------------------------------------------------------ #
-# PDFium: vendor/ bevorzugt, Fallback /opt/pdfium                    #
+# PDFium                                                              #
+#                                                                     #
+# Plattformspezifisches vendor-Verzeichnis zuerst. Das ist noetig,    #
+# damit beim Cross-Compile das Linux- und das Windows-PDFium im       #
+# selben Baum nebeneinander liegen koennen -- ein gemeinsames         #
+# vendor/pdfium wuerde sich sonst gegenseitig ueberschreiben.         #
+# vendor/pdfium bleibt als Fallback erhalten (aeltere Bauemume).      #
 # ------------------------------------------------------------------ #
-VENDOR_PDFIUM = vendor/pdfium
-
-ifneq ($(wildcard $(VENDOR_PDFIUM)/lib/$(PDFIUM_LIB_FILE)),)
-    PDFIUM_DIR = $(VENDOR_PDFIUM)
-else ifneq ($(wildcard $(VENDOR_PDFIUM)/bin/$(PDFIUM_LIB_FILE)),)
-    PDFIUM_DIR = $(VENDOR_PDFIUM)
+ifeq ($(PLATFORM),windows)
+    PDFIUM_VENDOR = vendor/pdfium-win-x64
 else
+    PDFIUM_VENDOR = vendor/pdfium-linux-x64
+endif
+
+PDFIUM_SEARCH = $(PDFIUM_VENDOR) vendor/pdfium /opt/pdfium
+PDFIUM_DIR := $(firstword $(foreach d,$(PDFIUM_SEARCH),\
+    $(if $(or $(wildcard $(d)/lib/$(PDFIUM_LIB_FILE)),\
+              $(wildcard $(d)/bin/$(PDFIUM_LIB_FILE))),$(d))))
+
+ifeq ($(PDFIUM_DIR),)
     PDFIUM_DIR = /opt/pdfium
 endif
+
+# Die dist-Ziele laufen im aeusseren Make, wo PLATFORM noch "linux" ist --
+# PDFIUM_DIR zeigt dort auf den Linux-Baum. Fuer das Einsammeln der
+# Windows-DLL brauchen wir den Windows-Baum, unabhaengig von PLATFORM.
+PDFIUM_WIN_DIR := $(firstword $(foreach d,vendor/pdfium-win-x64 vendor/pdfium,\
+    $(if $(wildcard $(d)/bin/pdfium.dll),$(d))))
 
 # RPATH zeigt auf $ORIGIN — PDFium-Library liegt im gleichen Subdir
 ifeq ($(PLATFORM),windows)
@@ -215,7 +232,7 @@ endif
 
 SRC = src/pdfiumtcl.c
 
-PKGVERSION   = 0.5.1
+PKGVERSION   = 0.5.2
 PKGNAME      = tclpdfium$(PKGVERSION)
 # Gemeinsames Installverzeichnis fuer alle Plattformen:
 INSTALL_BASE = $(CURDIR)/out/$(PKGNAME)
@@ -305,23 +322,47 @@ dist-windows:
 	mkdir -p dist-win/windows64
 	cp pdfiumtcl.dll dist-win/windows64/
 	cp pkgIndex.tcl  dist-win/
-	@if [ -f vendor/pdfium/bin/pdfium.dll ]; then \
-	    cp vendor/pdfium/bin/pdfium.dll dist-win/windows64/; \
+	@if [ -f $(PDFIUM_WIN_DIR)/bin/pdfium.dll ]; then \
+	    cp $(PDFIUM_WIN_DIR)/bin/pdfium.dll dist-win/windows64/; \
 	    echo "OK: dist-win/windows64/ befuellt"; \
 	    echo "    pdfiumtcl.dll + pdfium.dll + pkgIndex.tcl"; \
 	else \
-	    echo "WARNUNG: pdfium.dll nicht gefunden (setup.sh PDFIUM_PLATFORM=win-x64)"; \
+	    echo "WARNUNG: pdfium.dll nicht gefunden (vendor/pdfium-win-x64/bin)"; \
+	    echo "         PDFIUM_PLATFORM=win-x64 bash scripts/setup.sh"; \
 	fi
 
-dist-windows90:
-	@echo "FEHLER: Windows Tcl-9-DLL via Cross-Compile nicht moeglich."
-	@echo "        Benoetigt MinGW-kompatible libtclstub9.a -- nicht vorhanden."
-	@echo "        MSYS2-Paket mingw-w64-x86_64-tcl9 fehlt (Stand 2026-03)."
-	@echo "        BAWT 903 libtclstub.a ist MSVC-only, nicht MinGW-kompatibel."
-	@echo ""
-	@echo "        Alternative: Nativ unter Windows mit MSYS2 bauen,"
-	@echo "        sobald mingw-w64-x86_64-tcl9 verfuegbar ist."
-	@exit 1
+# Windows + Tcl 9 via cross-compile.
+#
+# This used to bail out with "not possible: MSYS2 has no mingw-w64-x86_64-tcl9
+# package". That was a wrong diagnosis. A stub library is not extracted from a
+# DLL -- it is generic/tclStubLib.c compiled from the Tcl source tree, roughly
+# 160 lines of C. tools/make-win-stubs.sh builds it, and Tk's, in seconds.
+# No MSYS2 package and no Windows machine are involved.
+WIN_STUBS ?= $(CURDIR)/win-stubs
+
+$(WIN_STUBS)/lib/libtclstub.a:
+	./tools/make-win-stubs.sh core-9-0-2 $(WIN_STUBS)
+
+win-stubs: $(WIN_STUBS)/lib/libtclstub.a
+
+windows-cross90-stubs: $(WIN_STUBS)/lib/libtclstub.a
+	$(MAKE) PLATFORM=windows TCL_VERSION=9.0 \
+	    TCL_INC="-I$(WIN_STUBS)/include" \
+	    TK_INC="" \
+	    TCL_STUBLIB=$(WIN_STUBS)/lib/libtclstub.a \
+	    TK_STUBLIB=$(WIN_STUBS)/lib/libtkstub.a
+
+dist-windows90: windows-cross90-stubs
+	mkdir -p dist-win/windows64-tcl9
+	cp pdfiumtcl.dll dist-win/windows64-tcl9/
+	cp pkgIndex.tcl  dist-win/
+	@if [ -f $(PDFIUM_WIN_DIR)/bin/pdfium.dll ]; then \
+	    cp $(PDFIUM_WIN_DIR)/bin/pdfium.dll dist-win/windows64-tcl9/; \
+	    echo "OK: dist-win/windows64-tcl9/ befuellt"; \
+	else \
+	    echo "WARNUNG: pdfium.dll nicht gefunden (vendor/pdfium-win-x64/bin)"; \
+	    echo "         PDFIUM_PLATFORM=win-x64 bash scripts/setup.sh"; \
+	fi
 
 check: $(TARGET)
 	@echo "--- ldd-Pruefung (libtcl/libtk darf nicht erscheinen) ---"
@@ -352,11 +393,11 @@ both:
 
 # PDFium-Library ins Subdir kopieren (nach make install ausfuehren)
 install-pdfium:
-	@if [ -f vendor/pdfium/lib/libpdfium.so ]; then \
-	    cp vendor/pdfium/lib/libpdfium.so $(INSTALL_DIR)/; \
+	@if [ -f $(PDFIUM_DIR)/lib/libpdfium.so ]; then \
+	    cp $(PDFIUM_DIR)/lib/libpdfium.so $(INSTALL_DIR)/; \
 	    echo "OK: libpdfium.so -> $(INSTALL_DIR)/"; \
-	elif [ -f vendor/pdfium/bin/pdfium.dll ]; then \
-	    cp vendor/pdfium/bin/pdfium.dll $(INSTALL_DIR)/; \
+	elif [ -f $(PDFIUM_DIR)/bin/pdfium.dll ]; then \
+	    cp $(PDFIUM_DIR)/bin/pdfium.dll $(INSTALL_DIR)/; \
 	    echo "OK: pdfium.dll -> $(INSTALL_DIR)/"; \
 	else \
 	    echo "FEHLER: PDFium-Library nicht gefunden (setup.sh ausfuehren)"; \
@@ -384,5 +425,6 @@ clean:
 	rm -f pdfiumtcl.so pdfiumtcl.dll
 
 .PHONY: all all86 all90 both windows windows90 windows-bawt windows-bawt90 \
-        windows-cross windows-cross90 dist-windows dist-windows90 \
+        windows-cross windows-cross90 windows-cross90-stubs win-stubs \
+        dist-windows dist-windows90 \
         check install install90 install-pdfium install-windows clean
