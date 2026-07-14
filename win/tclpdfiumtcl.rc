@@ -1,0 +1,42 @@
+/*
+ * tclpdfiumtcl.rc — Versions-Ressource für Windows.
+ *
+ * rules.vc setzt $(DOTVERSION) und $(COMMAVERSION) via Definitionen,
+ * die wir hier übernehmen. Die Datei wird vom MSVC-Resource-Compiler
+ * (rc.exe) verarbeitet und die so entstehende .res-Datei wird in die
+ * .dll eingelinkt.
+ */
+#define APSTUDIO_READONLY_SYMBOLS
+#include "winver.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    COMMAVERSION
+ PRODUCTVERSION COMMAVERSION
+ FILEFLAGSMASK  0x3fL
+#ifdef _DEBUG
+ FILEFLAGS      VS_FF_DEBUG
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL
+ FILESUBTYPE    0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904E4"
+        BEGIN
+            VALUE "FileDescription",  "pdfiumtcl extension\0"
+            VALUE "FileVersion",      DOTVERSION "\0"
+            VALUE "InternalName",     "pdfiumtcl\0"
+            VALUE "LegalCopyright",   "BSD-2-Clause\0"
+            VALUE "OriginalFilename", "pdfiumtcl" DOTVERSION ".dll\0"
+            VALUE "ProductName",      "pdfiumtcl\0"
+            VALUE "ProductVersion",   DOTVERSION "\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1252
+    END
+END

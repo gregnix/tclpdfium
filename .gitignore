@@ -1,21 +1,43 @@
-# Build-Ausgaben
-*.so
-*.dll
-*.dll.lib
+# --- Von configure erzeugt --------------------------------------------------
+# Diese Dateien entstehen aus den .in-Vorlagen. Versioniert wird die Vorlage,
+# nicht das Ergebnis -- es enthaelt die Pfade des Rechners, auf dem konfiguriert
+# wurde, und waere auf jedem anderen falsch.
+/Makefile
+/pkgIndex.tcl
+config.status
+config.log
+config.cache
+autom4te.cache/
 
-# Windows-Distribution
+# --- Uebersetzungsergebnisse ------------------------------------------------
+*.o
+*.so
+*.dylib
+*.dll
+*.a
+*.exp
+*.pdb
+*.lib
+
+# --- Bauverzeichnisse des Windows-Cross-Compile -----------------------------
+# tools/build-windows.sh legt sie an; sie sind jederzeit neu erzeugbar.
+build-win-tcl8/
+build-win-tcl9/
+win-stubs-tcl8/
+win-stubs-tcl9/
 dist-win/
 
-# Cross-Compile: extrahierte MinGW-Pakete
-mingw64/
-windows/
+# --- PDFium ------------------------------------------------------------------
+# Wird von scripts/setup.sh geholt (rund 7 MB je Plattform). Gehoert nicht ins
+# Repository -- weder rechtlich noetig noch praktisch sinnvoll.
+vendor/
 
-# PDFium-Binaries (via setup.sh heruntergeladen)
-vendor/pdfium/bin/
-vendor/pdfium/lib/libpdfium.so
-vendor/pdfium/lib/pdfium.dll
-vendor/pdfium/lib/pdfium.dll.lib
-vendor/pdfium/lib/libpdfium.dylib
+# --- Testlauf ----------------------------------------------------------------
+# Die Erweiterung wird fuer "make test" neben die Objektdateien kopiert.
+/libpdfium.so
+/pdfium.dll
+_vfstest/
+tests/*.result
 
-# Nicht-öffentliche Dateien
+# --- Nicht-oeffentlich -------------------------------------------------------
 nogit/

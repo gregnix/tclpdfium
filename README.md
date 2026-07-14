@@ -7,7 +7,7 @@ metadata, search, bookmarks, form fields and annotations directly from
 Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
 delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.5.2  
+**Version:** 0.5.3  
 **License:** BSD  
 **Platform:** Linux x86_64, Windows x64 (MinGW, cross-built or native)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
@@ -69,28 +69,61 @@ pdfium::savewithversion doc filename version ?flags? -> 0|1   version 14..17
 
 ## Installation
 
+Builds with TEA — `configure`, `make`, `make install`, like any other Tcl
+extension. Full detail in [INSTALL.md](INSTALL.md).
+
 ### 1. Dependencies
 
 ```bash
 sudo apt install tcl-dev tk-dev build-essential
 ```
 
-### 2. Set up PDFium
+The `-dev` packages matter: without them there is no `tclConfig.sh`, and
+`configure` has nothing to work with.
+
+### 2. Get PDFium
 
 ```bash
 bash scripts/setup.sh
 ```
 
-Downloads `libpdfium.so` and headers from
-[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries)
-into `vendor/pdfium/`.
+Downloads `libpdfium.so` and the headers from
+[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) into
+`vendor/pdfium-linux-x64/`. About 7 MB; not in the repository.
 
 ### 3. Build
 
 ```bash
-make clean && make
+./configure --with-tcl=/usr/lib/tcl9.0 --with-tk=/usr/lib/tk9.0
+make
 make check
+make test
+sudo make install
 ```
+
+**Name the Tcl.** `--with-tcl` and `--with-tk` take the *directory* holding
+`tclConfig.sh` resp. `tkConfig.sh`. They decide which Tcl the extension is built
+against and installed into. Omit them and a search heuristic guesses — on a
+machine with several installations it may guess inconsistently, taking Tcl from
+one and Tk from another. To see what is there:
+
+```bash
+tclsh tools/find-tclconfig.tcl
+```
+
+### Tcl 8 and Tcl 9 side by side
+
+Build twice (with `make distclean` in between) and both land in the same
+directory. TEA names the libraries differently, and `pkgIndex.tcl` picks at load
+time — one directory, both interpreters.
+
+### Windows
+
+```bash
+./tools/build-windows.sh core-9-0-2       # cross-compile, on Linux
+```
+
+Natively in MSYS2: see [INSTALL.md](INSTALL.md).
 
 ---
 
@@ -186,18 +219,21 @@ TCLLIBPATH=. wish app/viewer.tcl document.pdf
 
 ```
 tclpdfium/
-  Makefile
-  pkgIndex.tcl
-  src/              C source code (pdfiumtcl.c)
-  app/              Tcl applications (viewer.tcl, viewer2.tcl)
-  scripts/          Shell scripts (setup.sh, createpdf.sh)
-  examples/         Example scripts
-  docs/             Documentation
-    en/             API reference, getting started
-  vendor/pdfium/    PDFium library (downloaded by setup.sh)
-    include/        PDFium headers
-    lib/            libpdfium.so / pdfium.dll (not in repo)
-    licenses/       Third-party licenses
+  configure           TEA; generated from configure.ac (checked in)
+  configure.ac        --with-pdfium, Tcl/Tk version guard
+  Makefile.in         plus install-pdfium, pdfium-local, check
+  pkgIndex.tcl.in     VFS-capable loader
+  tclconfig/          TEA machinery (tcl.m4) — do not patch
+  generic/            C source (tclpdfiumtcl.c)
+  app/                Tcl applications (viewer.tcl, viewer2.tcl)
+  scripts/            setup.sh, get-pdfium.cmd, createpdf.sh
+  tools/              build-windows.sh, make-win-stubs.sh,
+                      find-tclconfig.tcl, test-windows.tcl, test-vfs.tcl
+  tests/              tcltest suite
+  win/                MSVC build (nmake -f makefile.vc)
+  doc/                API reference, getting started, man page
+  examples/           example scripts
+  vendor/             PDFium (fetched by setup.sh, not in repo)
 ```
 
 ---
@@ -205,8 +241,8 @@ tclpdfium/
 ## Platform Notes
 
 - **Linux x86_64:** fully supported, tested on Tcl 8.6 and 9.0
-- **Windows x64:** cross-built on Linux (`make dist-windows`, `make dist-windows90`)
-  or natively via BAWT/MSYS2 — Tcl 8.6 and 9.0
+- **Windows x64:** cross-built on Linux (`tools/build-windows.sh`) or natively
+  in MSYS2 — Tcl 8.6 and 9.0, both verified
 - **macOS:** not yet tested
 - **Stub-based:** one binary per Tcl major version; no `libtcl`/`libtk` link
 - **Starpack-ready:** loads from a VFS without leaving `libpdfium` behind
@@ -214,6 +250,32 @@ tclpdfium/
 ---
 
 ## Changes
+
+### 0.5.3
+
+- **TEA build.** `configure && make && make test && make install`, like any other
+  Tcl extension. `--with-pdfium` points at the SDK; without it,
+  `vendor/pdfium-<platform>/` is found automatically. `configure` probes for the
+  link library name rather than guessing it, sets the `$ORIGIN` runpath, and
+  `make install` copies the PDFium runtime next to the extension. The
+  hand-written Makefile is gone.
+- **One directory serves both Tcl generations.** TEA names the libraries
+  `libpdfiumtcl<ver>.so` and `libtcl9pdfiumtcl<ver>.so`; `pkgIndex.tcl` picks at
+  load time.
+- **`configure` aborts on a Tcl/Tk version mismatch.** Without `--with-tcl` and
+  `--with-tk` the search heuristic guesses, and with several installations it may
+  guess inconsistently — unversioned symlinks such as `/usr/lib/tclConfig.sh` are
+  a common cause. Compiling `tk.h` from one generation against `tcl.h` from
+  another used to succeed and fail later, somewhere unrelated.
+- **`Tcl_Size` shim fixed.** It tested only `TCL_SIZE_MAX`. TEA passes
+  `-DTcl_Size=int` on the command line for a Tcl 8 build, so the typedef expanded
+  to `typedef int int;` and the compiler stopped.
+- **Windows cross-build in one command** — `tools/build-windows.sh`. It compiles
+  the Tcl/Tk stub libraries for MinGW from source, writes a `tclConfig.sh` for the
+  target, builds in its own directory, and inspects the DLL before shipping it.
+- **`tools/find-tclconfig.tcl`** lists every `tclConfig.sh`/`tkConfig.sh` on the
+  machine with its version, pairs them, and prints the matching `configure` line.
+  Runs anywhere a `tclsh` does, Windows included.
 
 ### 0.5.2
 
@@ -258,7 +320,8 @@ tclpdfium/
 - [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) — prebuilt PDFium
 - [pdf4tcl](https://sourceforge.net/projects/pdf4tcl/) — create PDFs
 - [tkmcairo](https://github.com/gregnix/tkmcairo) — Cairo 2D graphics for Tcl
-- `docs/en/api-reference.md` — full API documentation
+- [doc/api-reference.md](doc/api-reference.md) — full API documentation
+- [INSTALL.md](INSTALL.md) — building, installing, troubleshooting
 
 ---
 
@@ -266,4 +329,4 @@ tclpdfium/
 
 tclpdfium: BSD  
 PDFium: BSD (Apache CLA)  
-Third-party licenses: see `vendor/pdfium/licenses/`
+Third-party licenses: see `vendor/pdfium-<platform>/licenses/`

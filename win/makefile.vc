@@ -1,0 +1,47 @@
+#------------------------------------------------------------- -*- makefile -*-
+#
+# makefile.vc für pdfiumtcl
+# Angelehnt an die offizielle Tcl Sample Extension
+# (https://github.com/tcltk/sampleextension/blob/main/win/makefile.vc).
+#
+# Basic build, test and install:
+#   nmake /f makefile.vc INSTALLDIR=c:\path\to\tcl
+#   nmake /f makefile.vc INSTALLDIR=c:\path\to\tcl test
+#   nmake /f makefile.vc INSTALLDIR=c:\path\to\tcl install
+#
+# Für weitere Build-Optionen (debug, static, ...) siehe TIP 477:
+# https://core.tcl-lang.org/tips/doc/main/tip/477.md
+
+# Der Paket-Name. Definiert auch die Init-Funktion (= "Pdfiumtcl_Init")
+# über STRING_TO_TITLE-Mechanik in rules.vc.
+PROJECT = pdfiumtcl
+
+PRJ_RCFILE = tclpdfiumtcl.rc
+
+!include "rules-ext.vc"
+
+# Object-Dateien.
+PRJ_OBJS = \
+	$(TMP_DIR)\tclpdfiumtcl.obj
+
+# Compiler-Flags. Erweitere bei Bedarf.
+PRJ_DEFINES = \
+	-D_CRT_SECURE_NO_DEPRECATE \
+	-D_CRT_NONSTDC_NO_DEPRECATE
+
+# Include-Pfade. Wenn du Vendor-Code in vendor/ hast, ergänze:
+# PRJ_INCLUDES = -I"$(ROOT)\vendor"
+
+# Standard-Targets aus targets.vc
+!include "$(_RULESDIR)\targets.vc"
+
+# pkgIndex.tcl-Generierung — Default ist ok.
+pkgindex: default-pkgindex
+
+# Wenn du Quellen aus vendor/ kompilieren willst, aktiviere die
+# folgende Regel und ergänze die .obj-Dateien in PRJ_OBJS oben:
+#
+# {$(ROOT)\vendor}.c{$(TMP_DIR)}.obj::
+#     $(CCPKGCMD) @<<
+# $<
+# <<

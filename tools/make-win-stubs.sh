@@ -100,8 +100,67 @@ for lib in tclstub tkstub; do
     fi
 done
 
+# ---------------------------------------------------------------------------
+# tclConfig.sh / tkConfig.sh fuer das Windows-Ziel.
+#
+# TEA liest aus diesen Dateien, welcher Compiler, welche Header und welche
+# Stub-Bibliothek zum Ziel-Tcl gehoeren. Fuer einen Cross-Compile gibt es sie
+# auf dem Linux-Rechner nicht -- also schreiben wir sie. Es sind Shell-
+# Variablen, kein Geheimnis.
+#
+# Die Stub-Bibliotheken muessen NEBEN der Datei liegen: TEA setzt den Pfad aus
+# dem Verzeichnis der tclConfig.sh und dem Namen aus TCL_STUB_LIB_FILE zusammen.
+# ---------------------------------------------------------------------------
+
+# Version aus dem Tag ableiten: core-9-0-2 -> 9.0
+ver=`echo "$TAG" | sed 's/^core-//; s/-/./g' | cut -d. -f1,2`
+major=`echo "$ver" | cut -d. -f1`
+minor=`echo "$ver" | cut -d. -f2`
+
+cat > "$PREFIX/lib/tclConfig.sh" <<EOF
+# Erzeugt von make-win-stubs.sh -- fuer den Cross-Compile nach Windows.
+TCL_VERSION='$ver'
+TCL_MAJOR_VERSION='$major'
+TCL_MINOR_VERSION='$minor'
+TCL_CC='$CROSS-gcc'
+TCL_DEFS=''
+TCL_SHLIB_SUFFIX='.dll'
+TCL_SHLIB_CFLAGS=''
+TCL_SHLIB_LD='$CROSS-gcc -shared'
+TCL_STUB_LIB_FILE='libtclstub.a'
+TCL_STUB_LIB_SPEC='-L$PREFIX/lib -ltclstub'
+TCL_STUB_LIB_PATH='$PREFIX/lib/libtclstub.a'
+TCL_INCLUDE_SPEC='-I$PREFIX/include'
+TCL_PREFIX='$PREFIX'
+TCL_EXEC_PREFIX='$PREFIX'
+TCL_SRC_DIR='$PREFIX'
+TCL_LIB_SPEC=''
+TCL_LIBS=''
+TCL_THREADS='1'
+TCL_CFLAGS_OPTIMIZE='-O2'
+TCL_CFLAGS_DEBUG='-g'
+TCL_EXTRA_CFLAGS=''
+TCL_SHARED_BUILD='1'
+EOF
+
+sed -e 's/^TCL_/TK_/' \
+    -e "s/'libtclstub.a'/'libtkstub.a'/" \
+    -e 's/-ltclstub/-ltkstub/' \
+    -e 's|/libtclstub.a|/libtkstub.a|' \
+    "$PREFIX/lib/tclConfig.sh" > "$PREFIX/lib/tkConfig.sh"
+
+echo "    tclConfig.sh  ok"
+echo "    tkConfig.sh   ok"
+
 echo
 echo "done:"
-echo "  $PREFIX/lib/libtclstub.a"
-echo "  $PREFIX/lib/libtkstub.a"
+echo "  $PREFIX/lib/libtclstub.a  libtkstub.a"
+echo "  $PREFIX/lib/tclConfig.sh  tkConfig.sh"
 echo "  $PREFIX/include/  ($(ls "$PREFIX/include"/*.h | wc -l) headers)"
+echo
+echo "TEA-Cross-Compile damit:"
+echo
+echo "  ./configure --host=$CROSS --build=\`gcc -dumpmachine\` \\"
+echo "              --with-tcl=$PREFIX/lib --with-tk=$PREFIX/lib \\"
+echo "              --with-pdfium=\$PWD/vendor/pdfium-win-x64"
+echo "  make"

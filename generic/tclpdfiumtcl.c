@@ -53,8 +53,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Tcl_Size: ab Tcl 9 definiert, fuer Tcl 8 als int */
-#ifndef TCL_SIZE_MAX
+/* Tcl_Size: ab Tcl 9 definiert, fuer Tcl 8 als int.
+ *
+ * Die zweite Bedingung ist nicht ueberfluessig: TEA reicht bei einem Tcl-8-Bau
+ * ein -DTcl_Size=int auf der Kommandozeile herein. Ohne die Abfrage expandiert
+ * der typedef unten zu "typedef int int;" und der Uebersetzer bricht ab. */
+#if !defined(TCL_SIZE_MAX) && !defined(Tcl_Size)
     typedef int Tcl_Size;
 #endif
 
@@ -1372,6 +1376,6 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
     Tcl_CreateObjCommand(interp, "::pdfium::savewithversion",
                          PdfiumSaveWithVersionCmd, NULL, NULL);
 
-    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5.2");
+    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5.3");
     return TCL_OK;
 }

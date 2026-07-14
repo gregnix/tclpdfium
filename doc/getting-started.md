@@ -78,45 +78,59 @@ The viewer includes:
 ## Build Options
 
 ```bash
-make                      # Linux, Tcl 8.6 (default)
-make TCL_VERSION=9.0      # Tcl 9  -> pdfiumtcl90.so
-make TCL_VERSION=8.5      # Tcl 8.5
-make PLATFORM=windows     # Windows cross-compile (mingw64)
-make both                 # Tcl 8.6 and 9.0 at once
+./configure --with-tcl=DIR --with-tk=DIR    # DIR holds tclConfig.sh / tkConfig.sh
+make
+make check                                  # stubs only? Init symbol exported?
+make test
+sudo make install
 ```
 
-### Tcl Version Environments
+| Option | Effect |
+|--------|--------|
+| `--with-tcl=DIR` | directory holding `tclConfig.sh` |
+| `--with-tk=DIR` | directory holding `tkConfig.sh` |
+| `--with-pdfium=DIR` | PDFium SDK; without it, `vendor/pdfium-<platform>/` is found |
+| `--prefix`, `--exec-prefix` | install elsewhere — **both** are needed |
 
-Two helper scripts set the correct environment before building and running:
-
-**Tcl 8.6 (default):**
+Which Tcl gets named decides which one the extension is built against **and
+installed into**. To see what is on the machine:
 
 ```bash
-. tools/tcl8env.sh
-make clean && make
-make install
-wish app/viewer.tcl myfile.pdf
+tclsh tools/find-tclconfig.tcl
 ```
 
-**Tcl 9.0:**
+### Tcl 8 and Tcl 9 side by side
+
+Build twice, into the same directory:
 
 ```bash
-. tools/tcl9env.sh
-make clean && make TCL_VERSION=9.0
-make install90
-wish9.0 app/viewer.tcl myfile.pdf
+./configure --with-tcl=/usr/lib/tcl8.6 --with-tk=/usr/lib/tk8.6
+make && sudo make install
+make distclean
+
+./configure --with-tcl=/usr/lib/tcl9.0 --with-tk=/usr/lib/tk9.0
+make && sudo make install
 ```
 
-The scripts set `TCLSH` and `TCLLIBPATH` so that the correct Tcl version
-is used for both building and running. Always source the appropriate script
-before switching between Tcl versions.
+TEA names the two libraries differently — `libpdfiumtcl<ver>.so` and
+`libtcl9pdfiumtcl<ver>.so` — and `pkgIndex.tcl` picks at load time. One
+directory serves both interpreters:
 
-### Install Locations
+```bash
+wish   app/viewer.tcl myfile.pdf     # Tcl 8.6
+wish9.0 app/viewer.tcl myfile.pdf    # Tcl 9.0
+```
 
-| Version | Command | Target |
-|---------|---------|--------|
-| Tcl 8.6 | `make install` | `~/lib/share/tcltk/tclpdfium0.5.2/` |
-| Tcl 9.0 | `make install90` | `~/lib/share/tcl9.0/tclpdfium0.5.2/` |
+`make distclean` between the two runs is not optional — otherwise object files
+of two ABIs get mixed, and that fails at run time, not at link time.
+
+### Windows
+
+```bash
+./tools/build-windows.sh core-9-0-2       # cross-compile, on Linux
+```
+
+Natively in MSYS2, see [INSTALL.md](../INSTALL.md).
 
 ---
 
@@ -124,10 +138,12 @@ before switching between Tcl versions.
 
 pdfiumtcl compiles and runs on both Tcl 8.6 and Tcl 9.0.
 
-Key compatibility details in `src/pdfiumtcl.c`:
+Key compatibility details in `generic/tclpdfiumtcl.c`:
 
 - `Tcl_Size` — Tcl 9 replaced `int` with `Tcl_Size` for string lengths.
-  pdfiumtcl defines `typedef int Tcl_Size` for Tcl 8 automatically.
+  pdfiumtcl defines `typedef int Tcl_Size` for Tcl 8 automatically —
+  guarded against TEA passing `-DTcl_Size=int` on the command line, which would
+  otherwise expand the typedef to `typedef int int;`.
 - Stubs — `Tcl_InitStubs` uses `"9.0"` for Tcl 9, `"8.5"` for Tcl 8.
 - UTF-16LE encoding — bookmark titles use `"utf-16le"` (Tcl 9) with
   fallback to `"unicode"` (Tcl 8) for correct Unicode handling including

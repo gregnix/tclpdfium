@@ -1,32 +1,35 @@
 # Installing tclpdfium
 
-Build and install the `pdfiumtcl` package (the PDFium binding for Tcl/Tk,
-version 0.5.2). PDFium itself is **not** in the repository — it is downloaded by
-`scripts/setup.sh` from
-[bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries).
+`pdfiumtcl` builds with TEA — `configure`, `make`, `make install`, like any other
+Tcl extension.
 
 ---
 
 ## Requirements
 
-- Linux x86_64 (Windows: see [Windows builds](#windows-builds))
-- Tcl/Tk 8.5, 8.6, or 9.0 with development headers
+- Linux, macOS, or Windows (MSYS2)
+- Tcl/Tk 8.6 or 9.0 **with development headers**
 - `gcc`, `make`
 
 ```bash
-sudo apt install tcl-dev tk-dev build-essential
+sudo apt install tcl-dev tk-dev build-essential      # Debian, Ubuntu
+sudo dnf install tcl-devel tk-devel gcc make         # Fedora, RHEL
 ```
 
-The binding is **stub-based**: `pdfiumtcl.so`/`.dll` does not link `libtcl` or
-`libtk` directly, so one binary runs on any interpreter of the same Tcl major
-version. Across major versions it does not — Tcl 9 is source compatible with
-8.6 but not binary compatible, so 8.x and 9.x need separate builds. That is what
-the `linux64` / `linux64-tcl9` split below is for.
+Without the development package there is no `tclConfig.sh`, and `configure` has
+nothing to work with. That file is the whole point: it records which compiler
+built this Tcl, where its headers are, and what its stub library is called.
 
-**Tk is optional.** The package loads and works in a plain `tclsh` with no
+The binding is **stub-based**: the shared library does not link `libtcl` or
+`libtk`, so one binary runs on any interpreter of the same Tcl generation.
+Across generations it does not — Tcl 9 is source compatible with 8.6 but not
+binary compatible. Build once per generation; both results can live in the same
+directory (see below).
+
+**Tk is optional at run time.** The package loads in a plain `tclsh` with no
 display. Tk stubs are initialised lazily, and only `pdfium::render` and
-`pdfium::addimagebitmap` need them — everything else (reading, text extraction,
-writing, page manipulation) is headless.
+`pdfium::addimagebitmap` need them. Everything else — reading, text extraction,
+writing, page manipulation — is headless. Tk headers *are* needed to compile.
 
 ---
 
@@ -37,309 +40,249 @@ git clone https://github.com/gregnix/tclpdfium.git
 cd tclpdfium
 ```
 
-## 2. Download PDFium
+## 2. Get PDFium
+
+PDFium is a prebuilt binary, about 7 MB. It is not in the repository.
 
 ```bash
-bash scripts/setup.sh
+bash scripts/setup.sh                             # -> vendor/pdfium-linux-x64/
+PDFIUM_PLATFORM=win-x64 bash scripts/setup.sh     # -> vendor/pdfium-win-x64/
 ```
 
-`setup.sh` auto-detects the platform and fetches the matching archive into
-**`vendor/pdfium-<platform>/`** — `include/`, `lib/libpdfium.so`, and on Windows
-`bin/pdfium.dll` plus `lib/pdfium.dll.lib`.
-
-The directory carries the platform in its name on purpose: a cross build needs
-the Linux **and** the Windows PDFium in the tree at the same time. A shared
-`vendor/pdfium/` would have them overwrite each other, and you would not notice
-until the link step.
-
-```bash
-bash scripts/setup.sh                           # -> vendor/pdfium-linux-x64
-PDFIUM_PLATFORM=win-x64 bash scripts/setup.sh   # -> vendor/pdfium-win-x64
-```
-
-Detected automatically: `linux-x64`, `linux-arm64`, `mac-arm64`, `mac-x64`,
-`win-x64`. The Makefile picks the matching directory from `PLATFORM`; a legacy
-`vendor/pdfium/` still works as a fallback.
-
-**On Windows without a shell:** `setup.sh` is bash. Use the cmd.exe counterpart:
-
-```cmd
-scripts\get-pdfium.cmd
-```
-
-It uses `curl.exe` and `tar.exe`, both shipped with Windows 10 (1803) and later.
-No bash, no PowerShell, no MSYS2.
+On Windows without a shell: `scripts\get-pdfium.cmd`.
 
 ## 3. Build
 
 ```bash
-make                      # Linux, Tcl 8.6 (default) -> pdfiumtcl.so
-make TCL_VERSION=9.0      # Linux, Tcl 9.0
-make TCL_VERSION=8.5      # Linux, Tcl 8.5
-make check                # verify the stub build (see below)
+./configure --with-tcl=/usr/lib/tcl9.0 --with-tk=/usr/lib/tk9.0
+make
+make check
+make test
+sudo make install
 ```
 
-`make check` confirms the binding does not link `libtcl`/`libtk` directly (`ldd`
-must not list them) and prints the exported init symbol (`Pdfiumtcl_Init`). A
-direct `libtcl`/`libtk` link is a build error, not a warning: it would nail the
-binding to one specific Tcl installation.
+### Which Tcl? — the question that decides everything
 
-`make` writes `pdfiumtcl.so` into the repository root. `make clean` removes the
-built `pdfiumtcl.so`/`pdfiumtcl.dll`.
+`--with-tcl` and `--with-tk` take the **directory** holding `tclConfig.sh` resp.
+`tkConfig.sh`, not the file. They decide which Tcl the extension is built
+against **and installed into**.
 
-## 4. Install
+Leave them out and a search heuristic guesses. With one Tcl installation that is
+fine. With several it is not, and the failure is a nasty one: Debian ships an
+*unversioned* `/usr/lib/tclConfig.sh` next to the versioned ones, and the Tcl one
+and the Tk one need not point at the same generation. `configure` then compiles
+`tk.h` from Tcl 9 against `tcl.h` from Tcl 8.6 — which used to succeed and fail
+later, somewhere unrelated. This build aborts instead, but only because both were
+found. Name them and the question does not arise.
+
+List what is on the machine:
 
 ```bash
-make install              # Tcl 8.6  -> out/tclpdfium0.5.2/linux64/
-make install90            # Tcl 9.0  -> out/tclpdfium0.5.2/linux64-tcl9/
-make both                 # clean + install (8.6) + clean + install90 (9.0)
+tclsh tools/find-tclconfig.tcl
 ```
 
-Each `install` target creates the per-platform package tree:
+It prints every `tclConfig.sh`/`tkConfig.sh` with its version, pairs them, and
+gives the matching `configure` line. Entries marked `->` are unversioned
+forwarders — do not use those.
+
+### Where it installs
+
+Into the Tcl it was built against — `<tcl-exec-prefix>/lib/pdfiumtcl<version>/`.
+That is deliberate: only there does `package require` find it without anyone
+touching `auto_path`.
+
+Check before installing:
+
+```bash
+grep -E '^prefix|^exec_prefix|^libdir' Makefile
+```
+
+To install somewhere else — a staging directory, say — pass **both** prefixes:
+
+```bash
+./configure --with-tcl=... --prefix=/opt/mytcl --exec-prefix=/opt/mytcl
+```
+
+`--prefix` alone does not move the library. TEA still takes `exec_prefix` from
+the Tcl configuration, and the installation falls apart: headers under the given
+prefix, the library under Tcl's. The message says one thing, the file is
+elsewhere.
+
+---
+
+## Tcl 8 and Tcl 9 side by side
+
+Build twice, install twice, into the **same** directory:
+
+```bash
+./configure --with-tcl=/usr/lib/tcl8.6 --with-tk=/usr/lib/tk8.6
+make && sudo make install
+make distclean
+
+./configure --with-tcl=/usr/lib/tcl9.0 --with-tk=/usr/lib/tk9.0
+make && sudo make install
+```
+
+The `make distclean` between the two is not optional — otherwise object files of
+two ABIs get mixed, and that fails at run time, not at link time.
+
+The result:
 
 ```
-out/tclpdfium0.5.2/
-  pkgIndex.tcl                 # selects the subdir at load time
-  linux64/                     # Tcl 8.x
-    pdfiumtcl.so
-    libpdfium.so
-  linux64-tcl9/                # Tcl 9.x
-    pdfiumtcl.so
-    libpdfium.so
+/usr/lib/pdfiumtcl0.5.3/
+    libpdfiumtcl0.5.3.so         Tcl 8.6
+    libtcl9pdfiumtcl0.5.3.so     Tcl 9.0
+    libpdfium.so                 shared by both
+    pkgIndex.tcl                 picks at load time
 ```
 
-| Build | Subdirectory |
-|-------|--------------|
-| Linux, Tcl 8.x | `linux64` |
-| Linux, Tcl 9.x | `linux64-tcl9` |
-| Windows, Tcl 8.x | `windows64` |
-| Windows, Tcl 9.x | `windows64-tcl9` |
+TEA gives the two libraries different names, and `pkgIndex.tcl` chooses. One
+directory, both interpreters:
 
-`pkgIndex.tcl` picks the right subdirectory at runtime from
-`tcl_platform(platform)`, `tcl_platform(pointerSize)` and the Tcl version, so one
-`tclpdfium0.5.2/` tree can hold several platforms side by side.
-
-> `pointerSize`, not `wordSize`: on Windows, `wordSize` is 4 even on a 64-bit Tcl
-> (LLP64). `wordSize` sends the loader looking for `windows32/`.
-
-`make install` also runs `install-pdfium`, copying `libpdfium.so` (or
-`pdfium.dll`) into the subdirectory **next to** the binding. That placement is
-not cosmetic — it is what the `$ORIGIN` runpath in `pdfiumtcl.so` resolves
-against.
+```
+$ echo 'puts [package require pdfiumtcl]' | tclsh8.6
+0.5.3
+$ echo 'puts [package require pdfiumtcl]' | tclsh9.0
+0.5.3
+```
 
 ---
 
 ## Using it
 
-Point Tcl at the directory that *contains* `tclpdfium0.5.2/`:
-
-```bash
-TCLLIBPATH=/path/to/out wish your-script.tcl
-```
-
 ```tcl
 package require pdfiumtcl
 
 set doc [pdfium::open document.pdf]
-puts "Pages: [pdfium::pagecount $doc]"
+puts "[pdfium::pagecount $doc] pages"
+puts [pdfium::gettext $doc 0]
 pdfium::close $doc
 ```
 
-A quick check that the package loads and finds PDFium — note this works in
-`tclsh`, with no display:
+No `auto_path` fiddling — the package sits in Tcl's own library directory.
+
+---
+
+## Windows, natively (MSYS2)
+
+In the **MSYS2 MinGW64 shell**. Neither cmd.exe nor PowerShell will do:
+`configure` is a shell script, and there is no `make`.
 
 ```bash
-echo 'package require pdfiumtcl; puts ok' | TCLLIBPATH=out tclsh
+tclsh tools/find-tclconfig.tcl               # what is installed?
+bash scripts/setup.sh                        # PDFium
+
+./configure --with-tcl=/c/Tcl9.0.4/lib --with-tk=/c/Tcl9.0.4/lib \
+            --prefix=/c/Tcl9.0.4 --exec-prefix=/c/Tcl9.0.4
+make
+make check
+make install
 ```
 
-(`tclsh` has no `-c` option. Passing one makes it read the script from standard
-input instead, and it sits there waiting.)
+For the 8.x series, the same with that installation's path. `make distclean`
+between the two runs.
+
+Three things matter more here than on Linux.
+
+**Give both prefixes.** Windows distributions are built and then moved; their
+`tclConfig.sh` still carries `TCL_EXEC_PREFIX` from the machine that built them.
+Without `--prefix` and `--exec-prefix`, TEA installs *there* — into a directory
+that may not exist on this machine, or into somebody's staging tree. The package
+then sits where nothing looks for it.
+
+**Tcl and Tk from the same tree.** MSYS2 ships its own Tcl/Tk 8.6. Without
+`--with-tk`, the search may pick `/mingw64/lib/tkConfig.sh` while Tcl comes from
+`C:/Tcl/lib`. Both say "8.6", so no version check fires — and Tk stubs of one
+installation get linked against Tcl stubs of another. On Windows both config
+files usually live in the same `lib` directory; give both options the same path.
+
+**The stub library is there.** Even in MSVC-built distributions: Tcl 9 ships
+`libtclstub.a` (no version number — that is the new convention), Tcl 8.6 ships
+`libtclstub86.a`. MinGW gcc handles both.
+
+## Windows, from a Linux machine
+
+No Windows box, no MSYS2:
+
+```bash
+sudo apt install mingw-w64
+
+./tools/build-windows.sh core-9-0-2      # Tcl 9.0
+./tools/build-windows.sh core-8-6-18     # Tcl 8.6
+```
+
+Result in `dist-win/windows64-tcl9/` resp. `dist-win/windows64/`: the DLL,
+`pdfium.dll` beside it, and the matching `pkgIndex.tcl`. Copy the directory to
+the Windows machine, into a directory on `auto_path`.
+
+The script compiles the Tcl and Tk **stub libraries** for the MinGW toolchain
+straight from the source tree — two C files. An MSYS2 `tcl9` package is not
+needed for that: a stub library is not derived from a DLL (that would be an
+*import* library, and would need `link.exe`), it is just `generic/tclStubLib.c`,
+compiled. The script also writes a `tclConfig.sh` for the target, without which
+TEA does not know what it is building against.
+
+Then it inspects the DLL: no `tcl90.dll`/`tk90.dll` among the dependencies (the
+stubs would not be doing their job), MinGW runtime linked statically, and the
+right Tcl generation in the `Tcl_InitStubs` call.
 
 ---
 
 ## Starpacks and virtual filesystems
 
-`pdfiumtcl` depends on a second shared library, and **nobody distributes
-dependent libraries for you**. When Tcl loads an extension out of a VFS —
-starpack, zipkit, `zipfs` — it copies only the *directly loaded* library to a
-temporary directory. `libpdfium.so` would stay behind in the VFS, where the
-operating system loader cannot see it. On Linux this is fatal: the `$ORIGIN`
-runpath then points at the temp directory, and `ld.so` does not search the
-executable's directory either.
+Tcl copies a *directly loaded* extension out of a VFS into a temp directory
+before handing it to the OS loader — but not its dependencies. `libpdfium` would
+stay behind in the VFS, where the loader cannot see it.
 
-The shipped `pkgIndex.tcl` handles this. If the package is not on a native
-filesystem, it unpacks **both** libraries itself, into the *same* directory, and
-loads from there. `$ORIGIN` lines up again, and the starpack stays a single file.
+The generated `pkgIndex.tcl` unpacks **both** libraries into one temp directory,
+so they find each other there. Under Unix via the `$ORIGIN` runpath; under
+Windows because the loader searches the directory of the loaded DLL. Different
+mechanisms, same result: **a starpack stays a single file.**
 
-Set **`TCLPDFIUM_TMPDIR`** to redirect the unpack directory. You need this when
-`/tmp` is mounted `noexec` — common on hardened servers — because `dlopen` then
-refuses the file and the error message points nowhere useful.
-
----
-
-## Tcl 8 vs Tcl 9
-
-Two helper scripts set `TCLSH`/`TCLLIBPATH` for the matching interpreter, so the
-right Tcl is used for building *and* running:
+If `/tmp` is mounted `noexec`, `dlopen` refuses. Redirect:
 
 ```bash
-. tools/tcl8env.sh            # Tcl 8.6
-make clean && make
-make install
-
-. tools/tcl9env.sh            # Tcl 9.0
-make clean && make TCL_VERSION=9.0
-make install90
+export TCLPDFIUM_TMPDIR=/var/tmp
 ```
-
-Source the appropriate script before switching versions.
-
----
-
-## Windows builds
-
-### Cross-compile on Linux (recommended, both Tcl versions)
-
-No Windows machine, no MSYS2, no BAWT.
-
-```bash
-sudo apt install mingw-w64 curl
-
-PDFIUM_PLATFORM=win-x64 bash scripts/setup.sh
-
-make dist-windows        # Tcl 8.6  -> dist-win/windows64/
-make dist-windows90      # Tcl 9.0  -> dist-win/windows64-tcl9/
-```
-
-`dist-windows90` builds the Tcl/Tk stub libraries first, by calling
-`tools/make-win-stubs.sh`. That script fetches the Tcl and Tk source trees and
-compiles exactly two files — `generic/tclStubLib.c` and `generic/tkStubLib.c`,
-about 160 lines each. Nothing else from the Tcl tree is needed, and no MSYS2
-`tcl9` package: a *stub* library is plain C from the source tree, unlike an
-*import* library, which is derived from a DLL and does need MSVC. Confusing the
-two is what made Tcl 9 on Windows look impossible for a while.
-
-To pin a different Tcl version, run it by hand:
-
-```bash
-./tools/make-win-stubs.sh core-8-6-16     # -> win-stubs/
-./tools/make-win-stubs.sh core-9-0-2
-```
-
-Verify the result without running it:
-
-```bash
-x86_64-w64-mingw32-objdump -p dist-win/windows64-tcl9/pdfiumtcl.dll \
-    | grep "DLL Name"
-```
-
-```
-DLL Name: pdfium.dll          <- the vendored library, expected
-DLL Name: KERNEL32.dll        <- Windows
-DLL Name: msvcrt.dll          <- msvcrt, not UCRT: matches MinGW/BAWT
-```
-
-`tcl90.dll` and `tk90.dll` must **not** appear — if they do, stubs are not in
-effect. `libgcc_s_seh-1.dll` and `libwinpthread-1.dll` must not appear either;
-the Makefile links the MinGW runtime statically.
-
-And the version string `Tcl_InitStubs` asks for:
-
-```bash
-strings -n 3 dist-win/windows64-tcl9/pdfiumtcl.dll | grep -x '9\.0'
-```
-
-`strings` drops anything shorter than four characters by default. Without
-`-n 3` you never see `9.0` and wrongly conclude the build is broken.
-
-`scripts/build-win.sh` does the same job by cross-building **all** of Tcl and Tk
-with `configure && make && make install` and linking against the result. It is
-slower, and its `REPO=` path at the top is hardcoded — edit it before use.
-
-### Native on Windows (BAWT / MinGW)
-
-For building against a BAWT tree. `build-tclpdfium-bawt.bat` needs **no `make`**
-— it calls `gcc` directly with the flags from this Makefile.
-
-Prerequisites:
-
-- BAWT's MinGW gcc from `gcc14.2.0_x86_64-w64-mingw32.7z`; the compiler is
-  `...\mingw64\bin\gcc.exe`.
-- The PDFium SDK under `vendor\pdfium-win-x64\`; run `scripts\get-pdfium.cmd` if
-  absent.
-- One BAWT `...\Development\opt\tcl` tree per Tcl version, each supplying
-  `include\tcl.h` + `tk.h` and the stub libraries.
-
-> **BAWT stub naming.** The **Tcl 8.6** stubs are *versioned*
-> (`libtclstub86.a`, `libtkstub86.a`); the **Tcl 9** stubs are *unversioned*
-> (`libtclstub.a`, `libtkstub.a`) — the Tcl 9 convention. The Makefile's 9.0
-> Windows wildcard matches both spellings, but if it comes up empty, pass the
-> paths explicitly.
-
-Edit the `CONFIG` lines at the top of `build-tclpdfium-bawt.bat`, then:
-
-```bat
-build-tclpdfium-bawt.bat
-```
-
-With GNU `make` available, the Makefile builds the same binary:
-
-```bat
-mingw32-make PLATFORM=windows TCL_VERSION=9.0 ^
-    WIN_TCL_ROOT=C:/Bawt/Bawt903/Windows/x64/Development/opt/tcl ^
-    TCL_STUBLIB=C:/Bawt/Bawt903/Windows/x64/Development/opt/tcl/lib/libtclstub.a ^
-    TK_STUBLIB=C:/Bawt/Bawt903/Windows/x64/Development/opt/tcl/lib/libtkstub.a
-```
-
-Verify it loads — **no `package require Tk` needed**:
-
-```tcl
-cd C:/.../libs/windows-tcl9.0/tclpdfium
-lappend auto_path [pwd]
-package require pdfiumtcl      ;# -> 0.5.2
-```
-
-### Install on Windows
-
-```bash
-make install-windows             # -> WIN_INSTALL_DIR/<subdir>/
-```
-
-`WIN_INSTALL_DIR` defaults to `WIN_TCL_ROOT/lib/tclpdfium0.5.2`. `pdfium.dll` is
-copied next to `pdfiumtcl.dll` so the Windows loader can resolve it.
 
 ---
 
 ## Troubleshooting
 
-- **`make check` reports a libtcl/libtk link** — the stub library path is wrong;
-  check `TCL_STUBLIB`/`TK_STUBLIB`. The binding must use stubs only.
+**`configure: error: Tcl and Tk versions do not match`**
+The heuristic picked Tcl from one installation and Tk from another. The message
+names both and suggests a matching pair. See *Which Tcl?* above.
 
-- **`PDFium-Library nicht gefunden` during install** — run `bash
-  scripts/setup.sh` first (`PDFIUM_PLATFORM=win-x64` for Windows,
-  `scripts\get-pdfium.cmd` in cmd.exe).
+**`configure: error: PDFium not found`**
+Run `bash scripts/setup.sh` first, or pass `--with-pdfium=DIR`.
 
-- **`package require pdfiumtcl` cannot load the library** — the `pdfium` shared
-  library must sit in the *same subdirectory* as `pdfiumtcl.*` (`install-pdfium`
-  does this), and the directory containing `tclpdfium0.5.2/` must be on
-  `auto_path`/`TCLLIBPATH`.
+**`make check` reports a libtcl/libtk link**
+The extension is linked against Tcl directly instead of through the stubs. It
+would then run only with the exact Tcl it was built against. This is not a link
+error — it surfaces at the user's site.
 
-- **`version conflict for package "tcl": have 9.0.4, need 8.5`** — an 8.x build
-  loaded into Tcl 9. Not a link error: the library loaded and `Tcl_InitStubs`
-  rejected it. Rebuild for the right generation (`make install90`).
+**`make test`: `libpdfium.so: cannot open shared object file`**
+`make test` loads the extension from the *build* directory, so `$ORIGIN` points
+there — and PDFium is not there. The `pdfium-local` target copies it, and runs
+automatically. If the test was invoked some other way, copy `libpdfium.so` next
+to the built library.
 
-- **`libpdfium.so: cannot open shared object file`, and the path in the message
-  is under `/tmp`** — the package is being loaded from a VFS with an old
-  `pkgIndex.tcl`. See [Starpacks](#starpacks-and-virtual-filesystems). If `/tmp`
-  is `noexec`, set `TCLPDFIUM_TMPDIR`.
+**`version conflict for package "tcl": have 9.0.4, need 8.5`**
+An 8.x build loaded into Tcl 9. Not a link error: the library loaded, and
+`Tcl_InitStubs` rejected it. Build for the right generation.
 
-- **Segfault instead of an error from `pdfium::addimagebitmap`** — fixed in
-  0.5.2. Earlier builds reached into the Tk stub table without having called
-  `Tk_InitStubs`; `tkStubsPtr` was NULL and the process died silently. Replace
-  the binary.
+**`package require pdfiumtcl` finds nothing**
+`make install` probably wrote somewhere unexpected. Check
+`grep -E '^prefix|^exec_prefix|^libdir' Makefile` — on Windows especially, see
+above.
 
-- **`cannot open PDF '...' (PDFium error 3)`** — the file is not a valid PDF
-  (corrupt, or actually PostScript/EPS such as `pcal` output). PDFium reads PDF
-  only; convert first (`ps2pdf in.ps out.pdf`) or rewrite a broken PDF with
-  `qpdf in.pdf out.pdf`. See the error-code table in
-  [docs/en/api-reference.md](docs/en/api-reference.md).
+**Segfault instead of an error from `pdfium::addimagebitmap`**
+Fixed in 0.5.2. Earlier builds reached into the Tk stub table without having
+called `Tk_InitStubs`; `tkStubsPtr` was NULL and the process died silently.
+Replace the binary.
+
+**`cannot open PDF '...' (PDFium error 3)`**
+Not a valid PDF — corrupt, or actually PostScript/EPS (`pcal` output, for
+instance). PDFium reads PDF only. Convert first (`ps2pdf in.ps out.pdf`), or
+rewrite a broken PDF with `qpdf in.pdf out.pdf`. Error codes are listed in
+[doc/api-reference.md](doc/api-reference.md).

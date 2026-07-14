@@ -1,0 +1,65 @@
+# -*- tcl -*-
+# Tcl package index file
+#
+# pdfiumtcl haengt von einer mitgelieferten Fremdbibliothek ab
+# (@PDFIUM_RUNTIME_NAME@). Beim Laden aus einem VFS -- Starpack, Zipkit,
+# zipfs -- kopiert Tcl nur die DIREKT geladene Bibliothek in ein
+# Temp-Verzeichnis; die Abhaengigkeit bliebe im VFS zurueck, wo der Loader
+# des Betriebssystems sie nicht sieht. Also packen wir beide selbst aus,
+# in dasselbe Verzeichnis.
+#
+# TCLPDFIUM_TMPDIR biegt das Zielverzeichnis um -- noetig, wenn /tmp mit
+# noexec gemountet ist, weil dlopen dann verweigert.
+
+namespace eval ::pdfium {}
+
+proc ::pdfium::_tempdir {} {
+    if {[info exists ::env(TCLPDFIUM_TMPDIR)]} { return $::env(TCLPDFIUM_TMPDIR) }
+    foreach v {TMPDIR TEMP TMP} {
+        if {[info exists ::env($v)] && [file isdirectory $::env($v)]} {
+            return $::env($v)
+        }
+    }
+    if {$::tcl_platform(platform) eq "windows"} { return "C:/Temp" }
+    return "/tmp"
+}
+
+proc ::pdfium::_load {dir libfile version} {
+    set ext    [file join $dir $libfile]
+    set vendor {@PDFIUM_RUNTIME_NAME@}
+
+    if {[lindex [file system $ext] 0] eq "native"} {
+        uplevel #0 [list load $ext Pdfiumtcl]
+        return
+    }
+
+    set tmp [file join [_tempdir] pdfiumtcl-$version-[pid]]
+    if {[catch {file mkdir $tmp} err]} {
+        return -code error "pdfiumtcl: kann $tmp nicht anlegen: $err\
+            (TCLPDFIUM_TMPDIR setzen)"
+    }
+    foreach f [list $vendor $libfile] {
+        set src [file join $dir $f]
+        set dst [file join $tmp $f]
+        if {![file exists $src]} {
+            return -code error "pdfiumtcl: $f fehlt im Paket ($src)"
+        }
+        if {![file exists $dst]} {
+            if {[catch {file copy -force $src $dst} err]} {
+                return -code error "pdfiumtcl: kann $f nicht auspacken: $err"
+            }
+        }
+    }
+    if {[catch {uplevel #0 [list load [file join $tmp $libfile] Pdfiumtcl]} err]} {
+        return -code error "pdfiumtcl: Laden aus $tmp fehlgeschlagen: $err\
+            (Verzeichnis mit noexec gemountet? Dann TCLPDFIUM_TMPDIR setzen)"
+    }
+}
+
+if {[package vsatisfies [package provide Tcl] 9.0-]} {
+    package ifneeded @PACKAGE_NAME@ @PACKAGE_VERSION@ \
+        [list ::pdfium::_load $dir {@PKG_LIB_FILE9@} {@PACKAGE_VERSION@}]
+} else {
+    package ifneeded @PACKAGE_NAME@ @PACKAGE_VERSION@ \
+        [list ::pdfium::_load $dir {@PKG_LIB_FILE8@} {@PACKAGE_VERSION@}]
+}
