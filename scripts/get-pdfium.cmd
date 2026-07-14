@@ -14,7 +14,11 @@ setlocal
 set "PLATFORM=%~1"
 if "%PLATFORM%"=="" set "PLATFORM=win-x64"
 
-set "ROOT=%~dp0.."
+rem %~dp0 endet mit einem Backslash; ".." dahinter ergaebe Pfade wie
+rem "...\scripts\..\vendor\...". Ueber ein pushd/popd wird der Pfad aufgeloest.
+pushd "%~dp0.."
+set "ROOT=%CD%"
+popd
 set "VENDOR=%ROOT%\vendor\pdfium-%PLATFORM%"
 set "ARCHIVE=pdfium-%PLATFORM%.tgz"
 set "URL=https://github.com/bblanchon/pdfium-binaries/releases/latest/download/%ARCHIVE%"
