@@ -2,7 +2,7 @@
 dnl	configure.ac für pdfiumtcl
 dnl	(nach dem offiziellen sampleextension: https://github.com/tcltk/sampleextension)
 
-AC_INIT([pdfiumtcl],[0.5.3])
+AC_INIT([pdfiumtcl],[0.6.0])
 
 TEA_INIT()
 
@@ -181,6 +181,28 @@ if test "${TEA_PLATFORM}" != "windows" ; then
     esac
 fi
 
+#-----------------------------------------------------------------------
+# Drucken unter Windows (GDI/DEVMODE).
+#
+# FPDF_RenderPage(HDC, ...) zeichnet direkt in einen Drucker-Device-Context.
+# Dafuer braucht es zwei Systembibliotheken:
+#
+#   gdi32     StartDoc/StartPage/GetDeviceCaps/CreateDC
+#   winspool  EnumPrinters/OpenPrinter/DocumentProperties/DeviceCapabilities
+#
+# Ausserhalb von Windows bleibt die Variable leer -- das Symbol
+# FPDF_RenderPage existiert dort gar nicht, dort ist CUPS zustaendig.
+#-----------------------------------------------------------------------
+
+PDFIUM_PRINT_LIBS=""
+if test "${TEA_PLATFORM}" = "windows" ; then
+    PDFIUM_PRINT_LIBS="-lgdi32 -lwinspool"
+fi
+AC_MSG_CHECKING([print support libraries])
+AC_MSG_RESULT([${PDFIUM_PRINT_LIBS:-none (non-Windows)}])
+
+AC_SUBST(PDFIUM_PRINT_LIBS)
+
 AC_SUBST(PDFIUM_DIR)
 AC_SUBST(PDFIUM_LINK)
 AC_SUBST(PDFIUM_RUNTIME)
@@ -195,6 +217,8 @@ TEA_ADD_SOURCES([tclpdfiumtcl.c])
 TEA_ADD_HEADERS([])
 TEA_ADD_INCLUDES([-I\"${PDFIUM_DIR}/include\"])
 TEA_ADD_LIBS([\"${PDFIUM_LINK}\"])
+dnl Leer ausserhalb von Windows -- TEA_ADD_LIBS haengt dann nichts an.
+TEA_ADD_LIBS([${PDFIUM_PRINT_LIBS}])
 TEA_ADD_CFLAGS([])
 TEA_ADD_STUB_SOURCES([])
 TEA_ADD_TCL_SOURCES([])

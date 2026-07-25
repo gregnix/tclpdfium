@@ -1,6 +1,6 @@
 # pdfiumtcl API Reference
 
-Version: 0.5.3
+Version: 0.6.0
 
 ---
 
@@ -489,3 +489,113 @@ Hardware-fixed pixel widths for `-width` option (300 DPI):
 | 102 | 1164 |
 
 Do not calculate `mm / 25.4 * 300` — use the table values.
+
+---
+
+## Printing (Windows only)
+
+PDFium can render into a Windows device context, which makes direct
+printing possible without any external program. These commands exist
+only on Windows; on other platforms `::pdfium::canprint` returns 0 and
+the remaining print commands are not created.
+
+### `::pdfium::canprint`
+
+Returns 1 on Windows builds with print support, 0 elsewhere. Available
+on all platforms — use it to branch instead of catching errors.
+
+### `::pdfium::printers`
+
+Returns a list of installed printer names.
+
+### `::pdfium::defaultprinter`
+
+Returns the system default printer name, or raises an error if none is
+configured.
+
+### `::pdfium::papers ?printer?`
+
+Returns the forms the driver offers, one sublist per form:
+
+```tcl
+{name code width_mm height_mm}
+```
+
+Relevant for label printers: Brother QL drivers expose their tapes as
+named forms. Use the reported code or name with `-paper`; a free-form
+`-paperw`/`-paperh` is often ignored by these drivers.
+
+### `::pdfium::print doc ?options?`
+
+Prints the document, returns the number of pages printed.
+
+| Option | Values | Default |
+|--------|--------|---------|
+| `-printer` | name | system default |
+| `-from` / `-to` | page index, 0-based | whole document |
+| `-copies` | integer | 1 |
+| `-mode` | 0=EMF … 5=PostScript3 passthrough | 0 |
+| `-rotate` | 0, 90, 180, 270 | 0 |
+| `-fit` | 1 = scale to printable area, 0 = 1:1 | 1 |
+| `-paper` | form name, code, or a4/a5/a3/letter/legal | driver default |
+| `-paperw` / `-paperh` | mm, both required | — |
+| `-orientation` | portrait, landscape | driver default |
+| `-duplex` | off, long, short | driver default |
+| `-source` | tray name or DMBIN_* code | driver default |
+| `-quality` | draft, low, medium, high, or DPI | driver default |
+| `-color` | auto, mono | driver default |
+| `-mediatype` | DMMEDIA_* or driver code | driver default |
+| `-nup` | pages per sheet: 1, 2, 4, 6, 9, 16 | 1 |
+| `-nuporder` | rows, cols | rows |
+| `-margin` | mm, all four sides, from the paper edge | 0 |
+| `-marginl` `-marginr` `-margint` `-marginb` | mm, override `-margin` | — |
+| `-scale` | percent; overrides `-fit` | — |
+| `-docname` | text shown in the print queue | "Tcl PDFium Job" |
+
+Notes:
+
+* `-duplex long`/`short` raises an error if the printer does not report
+  duplex support, rather than silently printing single-sided.
+* `-mode` is a global PDFium setting, not a per-call parameter. If the
+  same process also renders to screen, reset it to 0 after printing.
+* Copies go through the driver (`dmCopies`, collated) when it reports
+  support, otherwise the document is sent repeatedly.
+* `-scale` and `-nup` are computed here, not handed to the driver.
+  DEVMODE has `dmScale` and `dmNup`, but driver support is unreliable:
+  many drivers report the field and then silently reset it, which is
+  invisible from the outside. `-color` and `-mediatype` do go through
+  DEVMODE -- they describe hardware, not geometry.
+* Margins are measured from the paper edge and then clipped to the
+  printable area. With `-margin 0` the hardware margin always remains;
+  that is not an error.
+* With `-nup` greater than 1 each cell gets a 2 mm gutter. `-fit 0`
+  aligns to the cell corner rather than centring, so the position stays
+  predictable for labels.
+
+### `::pdfium::printercaps ?printer? ?-paper form?`
+
+Returns a dict describing the sheet geometry of the selected form:
+`paper_w_mm`, `paper_h_mm`, `print_w_mm`, `print_h_mm`,
+`margin_l_mm`, `margin_r_mm`, `margin_t_mm`, `margin_b_mm`,
+`borderless`, `dpi_x`, `dpi_y`, `planes`, `bitspixel`, `numcolors`.
+
+This is the way to answer the borderless question. Borderless is not an
+option that can be set, it is a property of the driver: on a borderless
+form the printable area reaches the sheet or overfills it, so the
+margins are zero or negative. Iterate over `::pdfium::papers` and
+measure each form to find out whether the driver offers one.
+
+Negative margins mean bleed -- the driver prints past the sheet edge so
+that no white stripe remains if the paper runs askew. Two to three
+millimetres of image content are lost at the border.
+
+```tcl
+if {[::pdfium::canprint]} {
+    set doc [::pdfium::open invoice.pdf]
+    ::pdfium::print $doc -printer "HP LaserJet" \
+        -paper a4 -duplex long -copies 2
+    ::pdfium::close $doc
+} else {
+    exec lp -d $printer invoice.pdf
+}
+```

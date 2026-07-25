@@ -7,7 +7,7 @@ metadata, search, bookmarks, form fields and annotations directly from
 Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
 delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.5.3  
+**Version:** 0.6.0  
 **License:** BSD  
 **Platform:** Linux x86_64, Windows x64 (MinGW, cross-built or native)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
@@ -250,6 +250,28 @@ tclpdfium/
 ---
 
 ## Changes
+
+### 0.6.0
+
+- **Windows printing (GDI/DEVMODE).** PDFium renders into a Windows device
+  context, so printing works without any external program. New commands, all
+  Windows-only: `::pdfium::canprint`, `::pdfium::printers`,
+  `::pdfium::defaultprinter`, `::pdfium::papers`, `::pdfium::print`, and
+  `::pdfium::printercaps`. On other platforms `canprint` returns 0 and the
+  rest are not created, so callers branch on it instead of catching errors.
+  Built and verified with both MSVC/nmake and MSYS2; Brother QL label
+  printing works. Full option reference in `doc/api-reference.md`.
+- **`::pdfium::print` covers the label and booklet cases.** Per-cell N-up with
+  a gutter, margins measured from the paper edge, exact 1:1 (`-fit 0`), and
+  scaling computed here rather than handed to the driver — `dmScale`/`dmNup`
+  are reported by many drivers and then silently ignored.
+- **`::pdfium::printercaps` answers the borderless question** by measuring the
+  printable area of each form instead of trusting a flag.
+- **Build wiring for the print path.** `configure.ac` adds
+  `-lgdi32 -lwinspool` on Windows; `win/makefile.vc` takes `PDFIUMDIR`, links
+  the pdfium import library and the Tk stubs (`PROJECT_REQUIRES_TK`), and
+  stops with a clear error if pdfium is not found rather than failing at the
+  final link.
 
 ### 0.5.3
 

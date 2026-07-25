@@ -53,6 +53,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Windows-Druck (GDI/DEVMODE): winspool fuer EnumPrinters und
+ * DocumentProperties, wchar.h fuer _wcsicmp. */
+#ifdef _WIN32
+#include <windows.h>
+#include <winspool.h>
+#include <wchar.h>
+#endif
+
 /* Tcl_Size: ab Tcl 9 definiert, fuer Tcl 8 als int.
  *
  * Die zweite Bedingung ist nicht ueberfluessig: TEA reicht bei einem Tcl-8-Bau
@@ -1306,6 +1314,941 @@ PdfiumSaveWithVersionCmd(ClientData cd, Tcl_Interp *interp,
     return TCL_OK;
 }
 
+/* ==================================================================== */
+/* Windows printing (GDI / DEVMODE)                                     */
+/*                                                                      */
+/* FPDF_RenderPage(HDC, ...) exists only in Windows builds of libpdfium; */
+/* Linux builds do not export the symbol. On Linux/macOS CUPS handles    */
+/* PDFs natively, so nothing is needed there.                           */
+/*                                                                      */
+/* Commands: canprint printers defaultprinter papers printercaps print  */
+/* Link with: gdi32 winspool                                            */
+/* ==================================================================== */
+
+#ifdef _WIN32
+
+#define PDFIUM_MIN(a,b) ((a) < (b) ? (a) : (b))
+
+/* -------------------------------------------------------------------- */
+/* UTF-8 (Tcl) <-> UTF-16 (Win32). Free results with ckfree().           */
+/* Deliberately not Tcl_WinUtfToTChar: removed in Tcl 9.                 */
+/* -------------------------------------------------------------------- */
+static WCHAR *
+PdfiumUtf8ToWide(const char *s)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    WCHAR *w = (WCHAR *)ckalloc((size_t)n * sizeof(WCHAR));
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    return w;
+}
+
+static Tcl_Obj *
+PdfiumWideToObj(const WCHAR *w)
+{
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return Tcl_NewStringObj("", 0);
+    char *s = (char *)ckalloc((size_t)n);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
+    Tcl_Obj *o = Tcl_NewStringObj(s, n - 1);
+    ckfree(s);
+    return o;
+}
+
+/* Resolve the printer name: explicit argument or system default.        */
+/* Returns a WCHAR* to free with ckfree, or NULL (interp result set).    */
+static WCHAR *
+PdfiumResolvePrinter(Tcl_Interp *interp, const char *given)
+{
+    if (given && *given) return PdfiumUtf8ToWide(given);
+
+    DWORD len = 0;
+    GetDefaultPrinterW(NULL, &len);
+    if (len == 0) {
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj("no printer given and no system default", -1));
+        return NULL;
+    }
+    WCHAR *w = (WCHAR *)ckalloc(len * sizeof(WCHAR));
+    if (!GetDefaultPrinterW(w, &len)) {
+        ckfree((char *)w);
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj("cannot query default printer", -1));
+        return NULL;
+    }
+    return w;
+}
+
+/* -------------------------------------------------------------------- */
+/* pdfium::printers  --  list of installed printers                      */
+/* -------------------------------------------------------------------- */
+static int
+PdfiumPrintersCmd(ClientData cd, Tcl_Interp *interp,
+                  int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 1) {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return TCL_ERROR;
+    }
+
+    DWORD needed = 0, count = 0;
+    const DWORD flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+
+    EnumPrintersW(flags, NULL, 4, NULL, 0, &needed, &count);
+    if (needed == 0) {
+        Tcl_SetObjResult(interp, Tcl_NewListObj(0, NULL));
+        return TCL_OK;
+    }
+
+    BYTE *buf = (BYTE *)ckalloc(needed);
+    if (!EnumPrintersW(flags, NULL, 4, buf, needed, &needed, &count)) {
+        ckfree((char *)buf);
+        PDFIUM_ERROR(interp, "EnumPrinters failed");
+    }
+
+    PRINTER_INFO_4W *pi = (PRINTER_INFO_4W *)buf;
+    Tcl_Obj *list = Tcl_NewListObj(0, NULL);
+    for (DWORD i = 0; i < count; i++)
+        Tcl_ListObjAppendElement(interp, list,
+                                 PdfiumWideToObj(pi[i].pPrinterName));
+
+    ckfree((char *)buf);
+    Tcl_SetObjResult(interp, list);
+    return TCL_OK;
+}
+
+/* -------------------------------------------------------------------- */
+/* pdfium::defaultprinter                                                */
+/* -------------------------------------------------------------------- */
+static int
+PdfiumDefaultPrinterCmd(ClientData cd, Tcl_Interp *interp,
+                        int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 1) {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return TCL_ERROR;
+    }
+    WCHAR *w = PdfiumResolvePrinter(interp, NULL);
+    if (!w) return TCL_ERROR;
+    Tcl_SetObjResult(interp, PdfiumWideToObj(w));
+    ckfree((char *)w);
+    return TCL_OK;
+}
+
+/* -------------------------------------------------------------------- */
+/* pdfium::papers ?printer?  --  the forms the driver offers             */
+/*                                                                       */
+/* Decisive for label printers: Brother QL drivers expose their tapes as */
+/* named forms ("62mm x 100mm"). A DMPAPER_USER with free dimensions is  */
+/* frequently ignored by them -- one has to use the reported code.       */
+/* -------------------------------------------------------------------- */
+static int
+PdfiumPapersCmd(ClientData cd, Tcl_Interp *interp,
+                int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc > 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "?printer?");
+        return TCL_ERROR;
+    }
+
+    WCHAR *wp = PdfiumResolvePrinter(interp,
+                    (objc == 2) ? Tcl_GetString(objv[1]) : NULL);
+    if (!wp) return TCL_ERROR;
+
+    int n = (int)DeviceCapabilitiesW(wp, NULL, DC_PAPERNAMES, NULL, NULL);
+    if (n <= 0) {
+        ckfree((char *)wp);
+        Tcl_SetObjResult(interp, Tcl_NewListObj(0, NULL));
+        return TCL_OK;
+    }
+
+    /* DC_PAPERNAMES: n blocks of 64 WCHAR, not necessarily terminated. */
+    WCHAR *names = (WCHAR *)ckalloc((size_t)n * 64 * sizeof(WCHAR));
+    WORD  *codes = (WORD  *)ckalloc((size_t)n * sizeof(WORD));
+    POINT *sizes = (POINT *)ckalloc((size_t)n * sizeof(POINT));
+
+    DeviceCapabilitiesW(wp, NULL, DC_PAPERNAMES, (LPWSTR)names, NULL);
+    DeviceCapabilitiesW(wp, NULL, DC_PAPERS,     (LPWSTR)codes, NULL);
+    DeviceCapabilitiesW(wp, NULL, DC_PAPERSIZE,  (LPWSTR)sizes, NULL);
+
+    Tcl_Obj *list = Tcl_NewListObj(0, NULL);
+    for (int i = 0; i < n; i++) {
+        WCHAR buf[65];
+        memcpy(buf, names + (size_t)i * 64, 64 * sizeof(WCHAR));
+        buf[64] = L'\0';
+
+        Tcl_Obj *e = Tcl_NewListObj(0, NULL);
+        Tcl_ListObjAppendElement(interp, e, PdfiumWideToObj(buf));
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewIntObj((int)codes[i]));
+        Tcl_ListObjAppendElement(interp, e,
+            Tcl_NewDoubleObj(sizes[i].x / 10.0));   /* 0.1 mm -> mm */
+        Tcl_ListObjAppendElement(interp, e,
+            Tcl_NewDoubleObj(sizes[i].y / 10.0));
+        Tcl_ListObjAppendElement(interp, list, e);
+    }
+
+    ckfree((char *)names); ckfree((char *)codes);
+    ckfree((char *)sizes); ckfree((char *)wp);
+    Tcl_SetObjResult(interp, list);
+    return TCL_OK;
+}
+
+/* Form name -> DEVMODE code, -1 when not found. */
+static int
+PdfiumPaperCodeByName(const WCHAR *printer, const char *utf8name)
+{
+    int n = (int)DeviceCapabilitiesW(printer, NULL, DC_PAPERNAMES, NULL, NULL);
+    if (n <= 0) return -1;
+
+    WCHAR *names = (WCHAR *)ckalloc((size_t)n * 64 * sizeof(WCHAR));
+    WORD  *codes = (WORD  *)ckalloc((size_t)n * sizeof(WORD));
+    DeviceCapabilitiesW(printer, NULL, DC_PAPERNAMES, (LPWSTR)names, NULL);
+    DeviceCapabilitiesW(printer, NULL, DC_PAPERS,     (LPWSTR)codes, NULL);
+
+    WCHAR *want = PdfiumUtf8ToWide(utf8name);
+    int found = -1;
+    for (int i = 0; i < n && found < 0; i++) {
+        WCHAR buf[65];
+        memcpy(buf, names + (size_t)i * 64, 64 * sizeof(WCHAR));
+        buf[64] = L'\0';
+        if (_wcsicmp(buf, want) == 0) found = (int)codes[i];
+    }
+    ckfree((char *)want); ckfree((char *)names); ckfree((char *)codes);
+    return found;
+}
+
+/* Tray name -> DMBIN_* code. Note: DC_BINNAMES uses 24 WCHAR blocks,
+ * not 64 as DC_PAPERNAMES does. */
+static int
+PdfiumBinCodeByName(const WCHAR *printer, const char *utf8name)
+{
+    int n = (int)DeviceCapabilitiesW(printer, NULL, DC_BINNAMES, NULL, NULL);
+    if (n <= 0) return -1;
+
+    WCHAR *names = (WCHAR *)ckalloc((size_t)n * 24 * sizeof(WCHAR));
+    WORD  *codes = (WORD  *)ckalloc((size_t)n * sizeof(WORD));
+    DeviceCapabilitiesW(printer, NULL, DC_BINNAMES, (LPWSTR)names, NULL);
+    DeviceCapabilitiesW(printer, NULL, DC_BINS,     (LPWSTR)codes, NULL);
+
+    WCHAR *want = PdfiumUtf8ToWide(utf8name);
+    int found = -1;
+    for (int i = 0; i < n && found < 0; i++) {
+        WCHAR buf[25];
+        memcpy(buf, names + (size_t)i * 24, 24 * sizeof(WCHAR));
+        buf[24] = L'\0';
+        if (_wcsicmp(buf, want) == 0) found = (int)codes[i];
+    }
+    ckfree((char *)want); ckfree((char *)names); ckfree((char *)codes);
+    return found;
+}
+
+/* -------------------------------------------------------------------- */
+/* DEVMODE construction                                                  */
+/*                                                                       */
+/* The Win32 sequence is four steps and step 4 is not optional: without  */
+/* it some drivers silently discard inconsistent combinations and the    */
+/* problem only surfaces in the spooler.                                 */
+/*   1. DocumentProperties(0)              -> required size              */
+/*   2. DocumentProperties(DM_OUT_BUFFER)  -> driver defaults            */
+/*   3. set fields plus their dmFields bits                              */
+/*   4. DocumentProperties(DM_IN|DM_OUT)   -> driver validates           */
+/*                                                                       */
+/* Step 2 also returns the private driver data behind dmDriverExtra. We  */
+/* only overwrite public fields, so driver-specific settings (e.g. the   */
+/* Brother auto-cut behaviour) survive into the job.                     */
+/* -------------------------------------------------------------------- */
+typedef struct {
+    int         paper_code;     /* -1 = unchanged */
+    const char *paper_name;     /* NULL = unused  */
+    double      paperw_mm, paperh_mm;   /* 0 = unused */
+    int         orientation;    /* 0 = unchanged, 1 portrait, 2 landscape */
+    int         duplex;         /* -1 = unchanged, else DMDUP_* */
+    int         source_code;    /* -1 = unchanged */
+    const char *source_name;
+    int         quality;        /* 0 = unchanged, else DMRES_* or DPI */
+    int         copies;         /* 0 = not through DEVMODE */
+    int         color;          /* 0 = unchanged, else DMCOLOR_* */
+    int         mediatype;      /* 0 = unchanged, else DMMEDIA_* */
+} PdfiumDevmodeWish;
+
+static void
+PdfiumWishInit(PdfiumDevmodeWish *w)
+{
+    memset(w, 0, sizeof(*w));
+    w->paper_code  = -1;
+    w->duplex      = -1;
+    w->source_code = -1;
+}
+
+static DEVMODEW *
+PdfiumBuildDevMode(Tcl_Interp *interp, const WCHAR *printer,
+                   const PdfiumDevmodeWish *wish)
+{
+    HANDLE hPrinter = NULL;
+    if (!OpenPrinterW((LPWSTR)printer, &hPrinter, NULL)) {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+            "OpenPrinter failed (Win32 error %lu)",
+            (unsigned long)GetLastError()));
+        return NULL;
+    }
+
+    LONG need = DocumentPropertiesW(NULL, hPrinter, (LPWSTR)printer,
+                                    NULL, NULL, 0);
+    if (need <= 0) {
+        ClosePrinter(hPrinter);
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "DocumentProperties: driver returned no DEVMODE", -1));
+        return NULL;
+    }
+
+    DEVMODEW *dm = (DEVMODEW *)ckalloc((size_t)need);
+    memset(dm, 0, (size_t)need);
+
+    if (DocumentPropertiesW(NULL, hPrinter, (LPWSTR)printer,
+                            dm, NULL, DM_OUT_BUFFER) != IDOK) {
+        ckfree((char *)dm); ClosePrinter(hPrinter);
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj("cannot read printer defaults", -1));
+        return NULL;
+    }
+
+    DWORD supported = dm->dmFields;
+
+    /* paper */
+    if (wish->paperw_mm > 0.0 && wish->paperh_mm > 0.0) {
+        dm->dmPaperSize   = DMPAPER_USER;
+        dm->dmPaperWidth  = (short)(wish->paperw_mm * 10.0 + 0.5);
+        dm->dmPaperLength = (short)(wish->paperh_mm * 10.0 + 0.5);
+        dm->dmFields |= DM_PAPERSIZE | DM_PAPERWIDTH | DM_PAPERLENGTH;
+    } else {
+        int code = wish->paper_code;
+        if (code < 0 && wish->paper_name) {
+            code = PdfiumPaperCodeByName(printer, wish->paper_name);
+            if (code < 0) {
+                ckfree((char *)dm); ClosePrinter(hPrinter);
+                Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+                    "unknown paper \"%s\" -- see ::pdfium::papers",
+                    wish->paper_name));
+                return NULL;
+            }
+        }
+        if (code >= 0) {
+            dm->dmPaperSize = (short)code;
+            dm->dmFields |= DM_PAPERSIZE;
+        }
+    }
+
+    /* orientation */
+    if (wish->orientation) {
+        dm->dmOrientation = (short)(wish->orientation == 2
+                                    ? DMORIENT_LANDSCAPE : DMORIENT_PORTRAIT);
+        dm->dmFields |= DM_ORIENTATION;
+    }
+
+    /* duplex -- deliberately a hard failure: printing a duplex job
+     * silently single-sided costs more than an error message */
+    if (wish->duplex >= 0) {
+        if (!(supported & DM_DUPLEX) ||
+            DeviceCapabilitiesW(printer, NULL, DC_DUPLEX, NULL, NULL) != 1) {
+            if (wish->duplex != DMDUP_SIMPLEX) {
+                ckfree((char *)dm); ClosePrinter(hPrinter);
+                Tcl_SetObjResult(interp,
+                    Tcl_NewStringObj("printer does not support duplex", -1));
+                return NULL;
+            }
+        }
+        dm->dmDuplex = (short)wish->duplex;
+        dm->dmFields |= DM_DUPLEX;
+    }
+
+    /* paper source */
+    {
+        int bin = wish->source_code;
+        if (bin < 0 && wish->source_name) {
+            bin = PdfiumBinCodeByName(printer, wish->source_name);
+            if (bin < 0) {
+                ckfree((char *)dm); ClosePrinter(hPrinter);
+                Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+                    "unknown paper source \"%s\"", wish->source_name));
+                return NULL;
+            }
+        }
+        if (bin >= 0) {
+            dm->dmDefaultSource = (short)bin;
+            dm->dmFields |= DM_DEFAULTSOURCE;
+        }
+    }
+
+    /* quality: positive = DPI, negative = DMRES_* */
+    if (wish->quality) {
+        dm->dmPrintQuality = (short)wish->quality;
+        dm->dmFields |= DM_PRINTQUALITY;
+        if (wish->quality > 0) {
+            dm->dmYResolution = (short)wish->quality;
+            dm->dmFields |= DM_YRESOLUTION;
+        }
+    }
+
+    /* colour and media type describe hardware, not geometry -- these
+     * belong in the DEVMODE, unlike scaling and n-up */
+    if (wish->color) {
+        dm->dmColor = (short)wish->color;
+        dm->dmFields |= DM_COLOR;
+    }
+    if (wish->mediatype) {
+        dm->dmMediaType = (DWORD)wish->mediatype;
+        dm->dmFields |= DM_MEDIATYPE;
+    }
+
+    /* copies through the driver: one spool job, collated */
+    if (wish->copies > 1) {
+        dm->dmCopies  = (short)wish->copies;
+        dm->dmCollate = DMCOLLATE_TRUE;
+        dm->dmFields |= DM_COPIES | DM_COLLATE;
+    }
+
+    if (DocumentPropertiesW(NULL, hPrinter, (LPWSTR)printer,
+                            dm, dm, DM_IN_BUFFER | DM_OUT_BUFFER) != IDOK) {
+        ckfree((char *)dm); ClosePrinter(hPrinter);
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj("driver rejected the print settings", -1));
+        return NULL;
+    }
+
+    ClosePrinter(hPrinter);
+    return dm;
+}
+
+/* -------------------------------------------------------------------- */
+/* pdfium::printercaps ?printer? ?-paper form?                           */
+/*                                                                       */
+/* Borderless is a property of the driver, not an option. It can be      */
+/* measured: on a borderless form the printable area reaches the sheet   */
+/* or overfills it, so the margins are zero or negative.                 */
+/* -------------------------------------------------------------------- */
+static int
+PdfiumPrinterCapsCmd(ClientData cd, Tcl_Interp *interp,
+                     int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    const char *paper  = NULL;
+    const char *pname  = NULL;
+    double paperw_mm = 0.0, paperh_mm = 0.0;
+    int argi = 1;
+
+    if (objc >= 2 && Tcl_GetString(objv[1])[0] != '-') {
+        pname = Tcl_GetString(objv[1]);
+        argi = 2;
+    }
+    if (((objc - argi) % 2) != 0) {
+        Tcl_WrongNumArgs(interp, 1, objv,
+            "?printer? ?-paper form? ?-paperw mm -paperh mm?");
+        return TCL_ERROR;
+    }
+    for (int i = argi; i < objc; i += 2) {
+        const char *opt = Tcl_GetString(objv[i]);
+        if (strcmp(opt, "-paper") == 0) {
+            paper = Tcl_GetString(objv[i + 1]);
+        } else if (strcmp(opt, "-paperw") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, objv[i + 1], &paperw_mm) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-paperh") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, objv[i + 1], &paperh_mm) != TCL_OK)
+                return TCL_ERROR;
+        } else {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown option \"%s\"", opt));
+            return TCL_ERROR;
+        }
+    }
+
+    WCHAR *wprinter = PdfiumResolvePrinter(interp, pname);
+    if (!wprinter) return TCL_ERROR;
+
+    /* Selecting a form or a custom size matters: otherwise one only ever
+     * measures the driver default. Custom sizes are the interesting case
+     * on continuous-tape printers, where the named forms carry only a
+     * nominal length -- a Brother QL-820NWB reports 29 mm for every tape
+     * regardless of how long the label actually is. Measuring shows
+     * whether the driver honours dmPaperLength or quietly ignores it. */
+    DEVMODEW *dm = NULL;
+    if (paper || (paperw_mm > 0.0 && paperh_mm > 0.0)) {
+        PdfiumDevmodeWish wish;
+        PdfiumWishInit(&wish);
+        if (paperw_mm > 0.0 && paperh_mm > 0.0) {
+            wish.paperw_mm = paperw_mm;
+            wish.paperh_mm = paperh_mm;
+        } else {
+            int code;
+            Tcl_Obj *o = Tcl_NewStringObj(paper, -1);
+            Tcl_IncrRefCount(o);
+            if (Tcl_GetIntFromObj(NULL, o, &code) == TCL_OK)
+                wish.paper_code = code;
+            else
+                wish.paper_name = paper;
+            Tcl_DecrRefCount(o);
+        }
+        dm = PdfiumBuildDevMode(interp, wprinter, &wish);
+        if (!dm) { ckfree((char *)wprinter); return TCL_ERROR; }
+    }
+
+    HDC hdc = CreateDCW(NULL, wprinter, NULL, dm);
+    if (dm) ckfree((char *)dm);
+    if (!hdc) {
+        ckfree((char *)wprinter);
+        PDFIUM_ERROR(interp, "cannot open printer device context");
+    }
+
+    int paper_w = GetDeviceCaps(hdc, PHYSICALWIDTH);
+    int paper_h = GetDeviceCaps(hdc, PHYSICALHEIGHT);
+    int off_x   = GetDeviceCaps(hdc, PHYSICALOFFSETX);
+    int off_y   = GetDeviceCaps(hdc, PHYSICALOFFSETY);
+    int area_w  = GetDeviceCaps(hdc, HORZRES);
+    int area_h  = GetDeviceCaps(hdc, VERTRES);
+    int dpi_x   = GetDeviceCaps(hdc, LOGPIXELSX);
+    int dpi_y   = GetDeviceCaps(hdc, LOGPIXELSY);
+    int planes  = GetDeviceCaps(hdc, PLANES);
+    int bits    = GetDeviceCaps(hdc, BITSPIXEL);
+    int colres  = GetDeviceCaps(hdc, NUMCOLORS);
+
+    DeleteDC(hdc);
+
+    if (dpi_x <= 0) dpi_x = 1;
+    if (dpi_y <= 0) dpi_y = 1;
+
+    double mmx = 25.4 / dpi_x;
+    double mmy = 25.4 / dpi_y;
+
+    double m_l = off_x * mmx;
+    double m_t = off_y * mmy;
+    double m_r = (paper_w - off_x - area_w) * mmx;
+    double m_b = (paper_h - off_y - area_h) * mmy;
+
+    int borderless = (m_l <= 0.1 && m_t <= 0.1 && m_r <= 0.1 && m_b <= 0.1);
+
+    Tcl_Obj *d = Tcl_NewDictObj();
+#define PDFIUM_PUTD(k, v) \
+    Tcl_DictObjPut(interp, d, Tcl_NewStringObj((k), -1), (v))
+
+    PDFIUM_PUTD("printer",     PdfiumWideToObj(wprinter));
+    PDFIUM_PUTD("dpi_x",       Tcl_NewIntObj(dpi_x));
+    PDFIUM_PUTD("dpi_y",       Tcl_NewIntObj(dpi_y));
+    PDFIUM_PUTD("paper_w_mm",  Tcl_NewDoubleObj(paper_w * mmx));
+    PDFIUM_PUTD("paper_h_mm",  Tcl_NewDoubleObj(paper_h * mmy));
+    PDFIUM_PUTD("print_w_mm",  Tcl_NewDoubleObj(area_w * mmx));
+    PDFIUM_PUTD("print_h_mm",  Tcl_NewDoubleObj(area_h * mmy));
+    PDFIUM_PUTD("margin_l_mm", Tcl_NewDoubleObj(m_l));
+    PDFIUM_PUTD("margin_r_mm", Tcl_NewDoubleObj(m_r));
+    PDFIUM_PUTD("margin_t_mm", Tcl_NewDoubleObj(m_t));
+    PDFIUM_PUTD("margin_b_mm", Tcl_NewDoubleObj(m_b));
+    PDFIUM_PUTD("borderless",  Tcl_NewBooleanObj(borderless));
+    /* What was asked for, so the caller can compare against what the
+     * driver actually delivered. */
+    PDFIUM_PUTD("want_w_mm",   Tcl_NewDoubleObj(paperw_mm));
+    PDFIUM_PUTD("want_h_mm",   Tcl_NewDoubleObj(paperh_mm));
+    PDFIUM_PUTD("planes",      Tcl_NewIntObj(planes));
+    PDFIUM_PUTD("bitspixel",   Tcl_NewIntObj(bits));
+    PDFIUM_PUTD("numcolors",   Tcl_NewIntObj(colres));
+#undef PDFIUM_PUTD
+
+    ckfree((char *)wprinter);
+    Tcl_SetObjResult(interp, d);
+    return TCL_OK;
+}
+
+/* -------------------------------------------------------------------- */
+/* Grid for n pages per sheet.                                           */
+/*                                                                       */
+/* The split follows the sheet, not a fixed table: on landscape two      */
+/* pages belong side by side, on portrait one above the other.           */
+/* -------------------------------------------------------------------- */
+static void
+PdfiumNupGrid(int n, int area_w, int area_h, int *cols, int *rows)
+{
+    int a, b;
+    switch (n) {
+        case 1:  a = 1; b = 1; break;
+        case 2:  a = 2; b = 1; break;
+        case 4:  a = 2; b = 2; break;
+        case 6:  a = 3; b = 2; break;
+        case 8:  a = 4; b = 2; break;
+        case 9:  a = 3; b = 3; break;
+        case 16: a = 4; b = 4; break;
+        default: a = n; b = 1; break;
+    }
+    if (area_w >= area_h) { *cols = a; *rows = b; }
+    else                  { *cols = b; *rows = a; }
+}
+
+/* -------------------------------------------------------------------- */
+/* pdfium::print doc ?-option value ...?                                 */
+/* -------------------------------------------------------------------- */
+static int
+PdfiumPrintCmd(ClientData cd, Tcl_Interp *interp,
+               int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc < 2 || (objc % 2) != 0) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle ?-option value ...?");
+        return TCL_ERROR;
+    }
+
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+
+    int total = FPDF_GetPageCount(doc);
+    if (total <= 0) PDFIUM_ERROR(interp, "document has no pages");
+
+    /* defaults */
+    const char *printer = NULL;
+    const char *docname = "Tcl PDFium Job";
+    int    from = 0, to = total - 1, copies = 1;
+    int    mode = 0;                  /* FPDF_PRINTMODE_EMF */
+    int    rotate_deg = 0, fit = 1;
+    int    nup = 1, nuporder_cols = 0;
+    double scale_pct = 0.0;           /* 0 = off, -fit applies */
+    double mm_l = 0.0, mm_r = 0.0, mm_t = 0.0, mm_b = 0.0;
+    int    have_margin[4] = {0, 0, 0, 0};
+
+    PdfiumDevmodeWish wish;
+    PdfiumWishInit(&wish);
+
+    for (int i = 2; i < objc; i += 2) {
+        const char *opt = Tcl_GetString(objv[i]);
+        Tcl_Obj    *val = objv[i + 1];
+
+        if (strcmp(opt, "-printer") == 0) {
+            printer = Tcl_GetString(val);
+        } else if (strcmp(opt, "-docname") == 0) {
+            docname = Tcl_GetString(val);
+        } else if (strcmp(opt, "-from") == 0) {
+            if (Tcl_GetIntFromObj(interp, val, &from) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-to") == 0) {
+            if (Tcl_GetIntFromObj(interp, val, &to) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-copies") == 0) {
+            if (Tcl_GetIntFromObj(interp, val, &copies) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-mode") == 0) {
+            if (Tcl_GetIntFromObj(interp, val, &mode) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-rotate") == 0) {
+            if (Tcl_GetIntFromObj(interp, val, &rotate_deg) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-fit") == 0) {
+            if (Tcl_GetBooleanFromObj(interp, val, &fit) != TCL_OK)
+                return TCL_ERROR;
+
+        } else if (strcmp(opt, "-paper") == 0) {
+            const char *v = Tcl_GetString(val);
+            if      (!strcmp(v, "a4"))     wish.paper_code = DMPAPER_A4;
+            else if (!strcmp(v, "a5"))     wish.paper_code = DMPAPER_A5;
+            else if (!strcmp(v, "a3"))     wish.paper_code = DMPAPER_A3;
+            else if (!strcmp(v, "letter")) wish.paper_code = DMPAPER_LETTER;
+            else if (!strcmp(v, "legal"))  wish.paper_code = DMPAPER_LEGAL;
+            else {
+                int code;
+                if (Tcl_GetIntFromObj(NULL, val, &code) == TCL_OK)
+                    wish.paper_code = code;
+                else
+                    wish.paper_name = v;
+            }
+        } else if (strcmp(opt, "-paperw") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, val, &wish.paperw_mm) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-paperh") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, val, &wish.paperh_mm) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-orientation") == 0) {
+            const char *v = Tcl_GetString(val);
+            if      (!strcmp(v, "portrait"))  wish.orientation = 1;
+            else if (!strcmp(v, "landscape")) wish.orientation = 2;
+            else PDFIUM_ERROR(interp, "-orientation: portrait|landscape");
+        } else if (strcmp(opt, "-duplex") == 0) {
+            const char *v = Tcl_GetString(val);
+            if      (!strcmp(v, "off")   || !strcmp(v, "simplex"))
+                wish.duplex = DMDUP_SIMPLEX;
+            else if (!strcmp(v, "long")  || !strcmp(v, "vertical"))
+                wish.duplex = DMDUP_VERTICAL;
+            else if (!strcmp(v, "short") || !strcmp(v, "horizontal"))
+                wish.duplex = DMDUP_HORIZONTAL;
+            else PDFIUM_ERROR(interp, "-duplex: off|long|short");
+        } else if (strcmp(opt, "-source") == 0) {
+            int code;
+            if (Tcl_GetIntFromObj(NULL, val, &code) == TCL_OK)
+                wish.source_code = code;
+            else
+                wish.source_name = Tcl_GetString(val);
+        } else if (strcmp(opt, "-quality") == 0) {
+            const char *v = Tcl_GetString(val);
+            if      (!strcmp(v, "draft"))  wish.quality = DMRES_DRAFT;
+            else if (!strcmp(v, "low"))    wish.quality = DMRES_LOW;
+            else if (!strcmp(v, "medium")) wish.quality = DMRES_MEDIUM;
+            else if (!strcmp(v, "high"))   wish.quality = DMRES_HIGH;
+            else if (Tcl_GetIntFromObj(interp, val, &wish.quality) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-color") == 0) {
+            const char *v = Tcl_GetString(val);
+            if      (!strcmp(v, "mono")) wish.color = DMCOLOR_MONOCHROME;
+            else if (!strcmp(v, "auto")) wish.color = DMCOLOR_COLOR;
+            else PDFIUM_ERROR(interp, "-color: auto|mono");
+        } else if (strcmp(opt, "-mediatype") == 0) {
+            if (Tcl_GetIntFromObj(interp, val, &wish.mediatype) != TCL_OK)
+                return TCL_ERROR;
+
+        } else if (strcmp(opt, "-nup") == 0) {
+            if (Tcl_GetIntFromObj(interp, val, &nup) != TCL_OK)
+                return TCL_ERROR;
+            if (nup < 1 || nup > 64) PDFIUM_ERROR(interp, "-nup: 1..64");
+        } else if (strcmp(opt, "-nuporder") == 0) {
+            const char *v = Tcl_GetString(val);
+            if      (!strcmp(v, "rows")) nuporder_cols = 0;
+            else if (!strcmp(v, "cols")) nuporder_cols = 1;
+            else PDFIUM_ERROR(interp, "-nuporder: rows|cols");
+        } else if (strcmp(opt, "-scale") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, val, &scale_pct) != TCL_OK)
+                return TCL_ERROR;
+            if (scale_pct <= 0.0)
+                PDFIUM_ERROR(interp, "-scale must be positive");
+        } else if (strcmp(opt, "-margin") == 0) {
+            double m;
+            if (Tcl_GetDoubleFromObj(interp, val, &m) != TCL_OK)
+                return TCL_ERROR;
+            if (!have_margin[0]) mm_l = m;
+            if (!have_margin[1]) mm_r = m;
+            if (!have_margin[2]) mm_t = m;
+            if (!have_margin[3]) mm_b = m;
+        } else if (strcmp(opt, "-marginl") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, val, &mm_l) != TCL_OK)
+                return TCL_ERROR;
+            have_margin[0] = 1;
+        } else if (strcmp(opt, "-marginr") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, val, &mm_r) != TCL_OK)
+                return TCL_ERROR;
+            have_margin[1] = 1;
+        } else if (strcmp(opt, "-margint") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, val, &mm_t) != TCL_OK)
+                return TCL_ERROR;
+            have_margin[2] = 1;
+        } else if (strcmp(opt, "-marginb") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, val, &mm_b) != TCL_OK)
+                return TCL_ERROR;
+            have_margin[3] = 1;
+
+        } else {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown option \"%s\"", opt));
+            return TCL_ERROR;
+        }
+    }
+
+    if (from < 0) from = 0;
+    if (to >= total) to = total - 1;
+    if (from > to)  PDFIUM_ERROR(interp, "empty page range");
+    if (copies < 1) copies = 1;
+
+    int rotate = ((rotate_deg % 360) + 360) % 360 / 90;   /* 0..3 */
+
+    WCHAR *wprinter = PdfiumResolvePrinter(interp, printer);
+    if (!wprinter) return TCL_ERROR;
+
+    /* Prefer driver-side copies (one spool job, collated). If the driver
+     * cannot do them, the loop below stays responsible. */
+    int hw_copies = (int)DeviceCapabilitiesW(wprinter, NULL,
+                                             DC_COPIES, NULL, NULL);
+    int loop_copies = copies;
+    if (copies > 1 && hw_copies >= copies) {
+        wish.copies = copies;
+        loop_copies = 1;
+    }
+
+    DEVMODEW *dm = PdfiumBuildDevMode(interp, wprinter, &wish);
+    if (!dm) { ckfree((char *)wprinter); return TCL_ERROR; }
+
+    HDC hdc = CreateDCW(NULL, wprinter, NULL, dm);
+    ckfree((char *)dm);
+    if (!hdc) {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+            "cannot open printer device context (Win32 error %lu)",
+            (unsigned long)GetLastError()));
+        ckfree((char *)wprinter);
+        return TCL_ERROR;
+    }
+    ckfree((char *)wprinter);
+
+    int paper_w = GetDeviceCaps(hdc, PHYSICALWIDTH);
+    int paper_h = GetDeviceCaps(hdc, PHYSICALHEIGHT);
+    int off_x   = GetDeviceCaps(hdc, PHYSICALOFFSETX);
+    int off_y   = GetDeviceCaps(hdc, PHYSICALOFFSETY);
+    int area_w  = GetDeviceCaps(hdc, HORZRES);
+    int area_h  = GetDeviceCaps(hdc, VERTRES);
+    int dpi_x   = GetDeviceCaps(hdc, LOGPIXELSX);
+    int dpi_y   = GetDeviceCaps(hdc, LOGPIXELSY);
+    if (dpi_x <= 0) dpi_x = 300;
+    if (dpi_y <= 0) dpi_y = 300;
+
+    /* Global setting, not a per-call parameter. Reset to 0 if the same
+     * process also renders to screen afterwards. */
+    FPDF_SetPrintMode(mode);
+
+    /* Content box. Margins are measured from the PAPER EDGE -- that is
+     * how users state them -- while the DC origin sits at the printable
+     * area, hence the shift by off_x/off_y. The box is then clipped to
+     * the printable area: a margin smaller than the hardware margin
+     * cannot be honoured, which is the normal case for -margin 0. */
+    int ml = (int)(mm_l / 25.4 * dpi_x + 0.5);
+    int mr = (int)(mm_r / 25.4 * dpi_x + 0.5);
+    int mt = (int)(mm_t / 25.4 * dpi_y + 0.5);
+    int mb = (int)(mm_b / 25.4 * dpi_y + 0.5);
+
+    int box_l = -off_x + ml;
+    int box_t = -off_y + mt;
+    int box_r = -off_x + paper_w - mr;
+    int box_b = -off_y + paper_h - mb;
+
+    if (box_l < 0)      box_l = 0;
+    if (box_t < 0)      box_t = 0;
+    if (box_r > area_w) box_r = area_w;
+    if (box_b > area_h) box_b = area_h;
+
+    int box_w = box_r - box_l;
+    int box_h = box_b - box_t;
+
+    if (box_w <= 0 || box_h <= 0) {
+        DeleteDC(hdc);
+        PDFIUM_ERROR(interp, "margins leave no printable area");
+    }
+
+    int cols, rows;
+    PdfiumNupGrid(nup, box_w, box_h, &cols, &rows);
+    int per_sheet = cols * rows;
+
+    /* With more than one page per sheet each cell gets a small gutter,
+     * otherwise the pages touch and the boundary is invisible. */
+    int gutter = (per_sheet > 1) ? (int)(2.0 / 25.4 * dpi_x + 0.5) : 0;
+    int cell_w = box_w / cols;
+    int cell_h = box_h / rows;
+
+    DOCINFOW di;
+    memset(&di, 0, sizeof(di));
+    di.cbSize = sizeof(di);
+    WCHAR *wdoc = PdfiumUtf8ToWide(docname);
+    di.lpszDocName = wdoc;
+
+    if (StartDocW(hdc, &di) <= 0) {
+        ckfree((char *)wdoc);
+        DeleteDC(hdc);
+        PDFIUM_ERROR(interp, "StartDoc failed");
+    }
+
+    int printed = 0;
+    int failed  = 0;
+
+    for (int c = 0; c < loop_copies && !failed; c++) {
+        for (int p = from; p <= to && !failed; p += per_sheet) {
+
+            if (StartPage(hdc) <= 0) { failed = 1; break; }
+
+            for (int k = 0; k < per_sheet && (p + k) <= to; k++) {
+
+                FPDF_PAGE page = FPDF_LoadPage(doc, p + k);
+                if (!page) { failed = 1; break; }
+
+                double nat_w = FPDF_GetPageWidth(page)  / 72.0 * dpi_x;
+                double nat_h = FPDF_GetPageHeight(page) / 72.0 * dpi_y;
+
+                int cw = cell_w - gutter;
+                int ch = cell_h - gutter;
+                if (cw < 1) cw = 1;
+                if (ch < 1) ch = 1;
+
+                double s;
+                if (scale_pct > 0.0) {
+                    /* Fixed scaling is exact, even if it overflows the
+                     * cell: someone asking for 200 % wants 200 %. */
+                    s = scale_pct / 100.0;
+                } else if (fit) {
+                    s = PDFIUM_MIN(cw / nat_w, ch / nat_h);
+                } else {
+                    s = 1.0;
+                }
+
+                int w = (int)(nat_w * s + 0.5);
+                int h = (int)(nat_h * s + 0.5);
+
+                int ci, ri;
+                if (nuporder_cols) { ci = k / rows; ri = k % rows; }
+                else               { ci = k % cols; ri = k / cols; }
+
+                int cell_x = box_l + ci * cell_w;
+                int cell_y = box_t + ri * cell_h;
+
+                int x, y;
+                if (fit || scale_pct > 0.0) {
+                    x = cell_x + (cw - w) / 2;
+                    y = cell_y + (ch - h) / 2;
+                } else {
+                    /* 1:1 at the cell corner -- predictable position,
+                     * which matters for labels */
+                    x = cell_x;
+                    y = cell_y;
+                }
+
+                FPDF_RenderPage(hdc, page, x, y, w, h, rotate,
+                                FPDF_ANNOT | FPDF_PRINTING);
+                FPDF_ClosePage(page);
+                printed++;
+            }
+
+            if (EndPage(hdc) <= 0) failed = 1;
+        }
+    }
+
+    if (failed) {
+        AbortDoc(hdc);
+        DeleteDC(hdc);
+        ckfree((char *)wdoc);
+        PDFIUM_ERROR(interp, "printing aborted");
+    }
+
+    EndDoc(hdc);
+    DeleteDC(hdc);
+    ckfree((char *)wdoc);
+
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(printed));
+    return TCL_OK;
+}
+
+#endif /* _WIN32 */
+
+/* -------------------------------------------------------------------- */
+/* pdfium::canprint  --  available on every platform, so callers can     */
+/* branch instead of catching errors                                     */
+/* -------------------------------------------------------------------- */
+static int
+PdfiumCanPrintCmd(ClientData cd, Tcl_Interp *interp,
+                  int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 1) {
+        Tcl_WrongNumArgs(interp, 1, objv, "");
+        return TCL_ERROR;
+    }
+#ifdef _WIN32
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(1));
+#else
+    Tcl_SetObjResult(interp, Tcl_NewBooleanObj(0));
+#endif
+    return TCL_OK;
+}
+
+
 PDFIUMTCL_EXPORT int
 Pdfiumtcl_Init(Tcl_Interp *interp)
 {
@@ -1376,6 +2319,22 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
     Tcl_CreateObjCommand(interp, "::pdfium::savewithversion",
                          PdfiumSaveWithVersionCmd, NULL, NULL);
 
-    Tcl_PkgProvide(interp, "pdfiumtcl", "0.5.3");
+    /* --- Drucken ------------------------------------------------------ */
+    Tcl_CreateObjCommand(interp, "::pdfium::canprint",
+                         PdfiumCanPrintCmd,        NULL, NULL);
+#ifdef _WIN32
+    Tcl_CreateObjCommand(interp, "::pdfium::printers",
+                         PdfiumPrintersCmd,        NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::defaultprinter",
+                         PdfiumDefaultPrinterCmd,  NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::papers",
+                         PdfiumPapersCmd,          NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::printercaps",
+                         PdfiumPrinterCapsCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::print",
+                         PdfiumPrintCmd,           NULL, NULL);
+#endif
+
+    Tcl_PkgProvide(interp, "pdfiumtcl", "0.6.0");
     return TCL_OK;
 }

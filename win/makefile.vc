@@ -5,9 +5,13 @@
 # (https://github.com/tcltk/sampleextension/blob/main/win/makefile.vc).
 #
 # Basic build, test and install:
-#   nmake /f makefile.vc INSTALLDIR=c:\path\to\tcl
-#   nmake /f makefile.vc INSTALLDIR=c:\path\to\tcl test
-#   nmake /f makefile.vc INSTALLDIR=c:\path\to\tcl install
+#   nmake /f makefile.vc INSTALLDIR=c:\Tcl PDFIUMDIR=c:\path\to\pdfium
+#   nmake /f makefile.vc INSTALLDIR=c:\Tcl PDFIUMDIR=c:\path\to\pdfium test
+#   nmake /f makefile.vc INSTALLDIR=c:\Tcl PDFIUMDIR=c:\path\to\pdfium install
+#
+# PDFIUMDIR must contain include\ (the fpdfview.h etc. headers) and
+# lib\pdfium.dll.lib (the MSVC import library). The matching pdfium.dll
+# must be on PATH or next to the built extension at run time.
 #
 # Für weitere Build-Optionen (debug, static, ...) siehe TIP 477:
 # https://core.tcl-lang.org/tips/doc/main/tip/477.md
@@ -16,7 +20,21 @@
 # über STRING_TO_TITLE-Mechanik in rules.vc.
 PROJECT = pdfiumtcl
 
+# This extension uses Tk (photo images: Tk_FindPhoto, Tk_PhotoPutBlock, ...).
+# Without this, rules.vc links only the Tcl stubs and the Tk symbols stay
+# unresolved at link time. Must stand BEFORE rules-ext.vc, which reads it.
+PROJECT_REQUIRES_TK = 1
+
 PRJ_RCFILE = tclpdfiumtcl.rc
+
+# --- pdfium: headers and MSVC import library ---------------------------
+# Override on the command line:  nmake ... PDFIUMDIR=c:\path\to\pdfium
+!ifndef PDFIUMDIR
+PDFIUMDIR = $(MAKEDIR)\..\vendor\pdfium-windows-x64
+!endif
+!if !exist("$(PDFIUMDIR)\lib\pdfium.dll.lib")
+!error PDFIUMDIR=$(PDFIUMDIR) has no lib\pdfium.dll.lib -- pass PDFIUMDIR=c:\path\to\pdfium (the dir with include\ and lib\).
+!endif
 
 !include "rules-ext.vc"
 
@@ -24,13 +42,18 @@ PRJ_RCFILE = tclpdfiumtcl.rc
 PRJ_OBJS = \
 	$(TMP_DIR)\tclpdfiumtcl.obj
 
+# Systembibliotheken fuer den Windows-Druck (GDI/DEVMODE).
+#   gdi32     StartDoc/StartPage/GetDeviceCaps/CreateDC
+#   winspool  EnumPrinters/OpenPrinter/DocumentProperties/DeviceCapabilities
+PRJ_LIBS = "$(PDFIUMDIR)\lib\pdfium.dll.lib" gdi32.lib winspool.lib
+
 # Compiler-Flags. Erweitere bei Bedarf.
 PRJ_DEFINES = \
 	-D_CRT_SECURE_NO_DEPRECATE \
 	-D_CRT_NONSTDC_NO_DEPRECATE
 
-# Include-Pfade. Wenn du Vendor-Code in vendor/ hast, ergänze:
-# PRJ_INCLUDES = -I"$(ROOT)\vendor"
+# Include-Pfade: die pdfium-Header.
+PRJ_INCLUDES = -I"$(PDFIUMDIR)\include"
 
 # Standard-Targets aus targets.vc
 !include "$(_RULESDIR)\targets.vc"

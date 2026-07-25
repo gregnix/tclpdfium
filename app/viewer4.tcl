@@ -1,11 +1,10 @@
 #!/usr/bin/env tclsh
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Gregor Ebbing
-# viewer.tcl  --  PDF-Viewer auf Basis von pdfiumtcl \u2014 Version 0.5
+# viewer.tcl  --  PDF-Viewer auf Basis von pdfiumtcl — Version 0.3
 #
 # Aufruf:  tclsh viewer.tcl datei.pdf
 
-set auto_path [linsert $auto_path 0 [file normalize  "../"]]
 
 package require Tk
 package require pdfiumtcl
@@ -28,15 +27,15 @@ wm minsize . 600 400
 
 # Toolbar
 frame .tb -relief raised -bd 1
-button .tb.open  -text "\u00d6ffnen"   -command cmd_open
-button .tb.prev  -text "\u25c0"         -command cmd_prev
-button .tb.next  -text "\u25b6"         -command cmd_next
+button .tb.open  -text "Öffnen"   -command cmd_open
+button .tb.prev  -text "◀"         -command cmd_prev
+button .tb.next  -text "▶"         -command cmd_next
 label  .tb.info  -textvariable state(pageinfo) -width 16
 label  .tb.dpi_l -text "DPI:"
 spinbox .tb.dpi  -from 72 -to 600 -increment 50 \
                  -textvariable state(dpi) -width 5 \
                  -command cmd_refresh
-button .tb.panel -text "Info \u25b6\u25c0"  -command cmd_toggle_panel
+button .tb.panel -text "Info ▶◀"  -command cmd_toggle_panel
 button .tb.text  -text "Text"     -command cmd_showtext
 button .tb.print -text "Drucken"  -command cmd_print
 button .tb.ql    -text "QL"       -command cmd_print_ql
@@ -151,67 +150,14 @@ bind . <Right> cmd_next
 bind . <Prior> cmd_prev
 bind . <Next>  cmd_next
 
-# Mausrad -- Linux/X11 (Button-4/5) + Windows/macOS/Touchpad (MouseWheel)
-bind all <Button-4> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        .pw.left.c yview scroll -3 units
-    }
+# Mausrad
+bind .pw.left.c <Control-MouseWheel> {
+    if {%D > 0} { cmd_zoom_in  } else { cmd_zoom_out }
 }
-bind all <Button-5> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        .pw.left.c yview scroll 3 units
-    }
-}
-bind all <MouseWheel> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        .pw.left.c yview scroll [expr {-(%D/120)*3}] units
-    }
-}
-bind all <Control-Button-4> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        cmd_zoom_in
-    }
-}
-bind all <Control-Button-5> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        cmd_zoom_out
-    }
-}
-bind all <Control-MouseWheel> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        if {%D > 0} { cmd_zoom_in } else { cmd_zoom_out }
-    }
-}
-bind all <Shift-Button-4> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        .pw.left.c xview scroll -3 units
-    }
-}
-bind all <Shift-Button-5> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        .pw.left.c xview scroll 3 units
-    }
-}
-bind all <Shift-MouseWheel> {
-    set w [winfo containing %X %Y]
-    if {$w eq ".pw.left.c" || [string match ".pw.left.*" $w]} {
-        .pw.left.c xview scroll [expr {-(%D/120)*3}] units
-    }
-}
-
-# Mittlere Maustaste: Drag-Scroll
-bind .pw.left.c <Button-2>  { .pw.left.c scan mark   %x %y }
-bind .pw.left.c <B2-Motion> { .pw.left.c scan dragto %x %y 1 }
-
-bind .pw.left.c <Enter> { focus .pw.left.c }
+bind .pw.left.c <Control-Button-4> { cmd_zoom_in  }
+bind .pw.left.c <Control-Button-5> { cmd_zoom_out }
+bind .pw.left.c <Button-4> { .pw.left.c yview scroll -3 units }
+bind .pw.left.c <Button-5> { .pw.left.c yview scroll  3 units }
 
 # ------------------------------------------------------------------ #
 # Befehle                                                             #
@@ -219,7 +165,7 @@ bind .pw.left.c <Enter> { focus .pw.left.c }
 proc cmd_open {} {
     global state
     set f [tk_getOpenFile \
-        -title "PDF \u00f6ffnen" \
+        -title "PDF öffnen" \
         -filetypes {{"PDF-Dokumente" .pdf} {"Alle Dateien" *}}]
     if {$f eq ""} return
     open_pdf $f
@@ -233,7 +179,7 @@ proc ask_password {filename} {
     wm resizable $w 0 0
     wm transient $w .
 
-    label  $w.l -text "Passwort f\u00fcr [file tail $filename]:"
+    label  $w.l -text "Passwort für [file tail $filename]:"
     entry  $w.e -show * -width 30
     frame  $w.f
     button $w.f.ok     -text "OK"        -default active \
@@ -277,7 +223,7 @@ proc open_pdf {filename {password ""}} {
     set state(file)  $filename
     set state(total) [pdfium::pagecount $doc]
     set state(page)  0
-    wm title . "PDF Viewer \u2013 [file tail $filename]"
+    wm title . "PDF Viewer – [file tail $filename]"
     update_info_panel
     show_page
 }
@@ -373,7 +319,7 @@ proc show_page {} {
     set n $state(total)
     set state(pageinfo) "Seite [expr {$p+1}] / $n"
 
-    # Rendern: Bild hei\u00dft immer "pdfpage"
+    # Rendern: Bild heißt immer "pdfpage"
     if {[catch {
         pdfium::render $state(doc) $p \
             -dpi $state(dpi) -imagename pdfpage
@@ -423,7 +369,7 @@ proc cmd_showtext {} {
     set w .textwin
     if {[winfo exists $w]} { destroy $w }
     toplevel $w
-    wm title $w "Text \u2013 Seite [expr {$state(page)+1}]"
+    wm title $w "Text – Seite [expr {$state(page)+1}]"
 
     text $w.t -wrap word -width 80 -height 30 \
         -yscrollcommand "$w.sb set"
@@ -439,8 +385,47 @@ proc cmd_showtext {} {
 # Drucken                                                             #
 # ------------------------------------------------------------------ #
 
-# Verf\u00fcgbare Drucker per lpstat ermitteln
+# Verfügbare Drucker per lpstat ermitteln
+# ------------------------------------------------------------------ #
+# Temporaeres Verzeichnis (plattformabhaengig)                        #
+#                                                                     #
+# Ersetzt das fest verdrahtete /tmp. Unter Windows gibt es das nicht; #
+# TEMP zeigt dort ueblicherweise nach AppData\Local\Temp.             #
+# ------------------------------------------------------------------ #
+proc tmpdir {} {
+    foreach v {TMPDIR TEMP TMP} {
+        if {[info exists ::env($v)] && [file isdirectory $::env($v)]} {
+            return $::env($v)
+        }
+    }
+    return [expr {$::tcl_platform(platform) eq "windows" ? "C:/Temp" : "/tmp"}]
+}
+
 proc get_printers {} {
+    # Windows: aus dem Spooler. Unix: aus CUPS.
+    if {$::tcl_platform(platform) eq "windows"} {
+        # Erst pruefen, OB diese pdfiumtcl-Version drucken kann. Fehlt der
+        # Windows-Druck (aeltere .so, oder eine zweite Kopie ohne Druck im
+        # Modulpfad), gibt es ::pdfium::printers gar nicht -- ein blankes
+        # `catch ... return [list]` verschluckt das und liefert eine leere
+        # Liste, ohne den Grund zu nennen.
+        if {![llength [info commands ::pdfium::canprint]] || ![::pdfium::canprint]} {
+            tk_messageBox -icon warning -title "Kein Windows-Druck" -message \
+                "Diese pdfiumtcl-Version kann unter Windows nicht drucken.\n\n\
+                 Vermutlich wird eine Kopie ohne Druckunterstuetzung geladen.\n\
+                 Pruefe mit:\n\
+                 \    echo puts \[info commands ::pdfium::*\] | tclsh\n\n\
+                 Fehlen dort printers/print/canprint, liegt eine alte .so im\
+                 Modulpfad (TCLLIBPATH) vor der installierten Fassung."
+            return [list]
+        }
+        if {[catch {::pdfium::printers} out]} {
+            tk_messageBox -icon error -title "Druckerliste" -message \
+                "::pdfium::printers ist fehlgeschlagen:\n$out"
+            return [list]
+        }
+        return $out
+    }
     if {[catch {exec lpstat -a} out]} {
         return [list]
     }
@@ -498,7 +483,7 @@ proc cmd_print {} {
     grid $w.f.rl $w.f.rf -sticky w -pady 3
 
     # DPI
-    label $w.f.dl -text "Druckqualit\u00e4t (DPI):" -anchor w
+    label $w.f.dl -text "Druckqualität (DPI):" -anchor w
     frame $w.f.df
     foreach d {150 300 600} {
         radiobutton $w.f.df.$d -text "${d} DPI" \
@@ -538,6 +523,38 @@ proc cmd_print {} {
 proc do_print {printer range dpi copies} {
     global state
 
+    # ---------------------------------------------------------------- #
+    #  Windows: direkt in den Drucker-Device-Context.                   #
+    #                                                                   #
+    #  Kein Rendern nach PNG, keine Zwischendateien, kein lp. Der       #
+    #  Parameter dpi ist hier gegenstandslos -- die Ausgabe hat immer   #
+    #  die Aufloesung, die der Treiber vorgibt.                        #
+    # ---------------------------------------------------------------- #
+    if {$::tcl_platform(platform) eq "windows"} {
+        if {$range eq "current"} {
+            set from $state(page)
+            set to   $state(page)
+        } else {
+            set from 0
+            set to   [expr {$state(total) - 1}]
+        }
+
+        set args [list -from $from -to $to -copies $copies -fit 1]
+        if {$printer ne "(Standard)"} { lappend args -printer $printer }
+
+        if {[catch {::pdfium::print $state(doc) {*}$args} res]} {
+            tk_messageBox -icon error -message "Druckfehler: $res"
+        } else {
+            tk_messageBox -icon info \
+                -message "Druckauftrag gesendet ($res Seite(n))."
+        }
+        return
+    }
+
+    # ---------------------------------------------------------------- #
+    #  Unix: rendern und an CUPS geben                                  #
+    # ---------------------------------------------------------------- #
+
     # Welche Seiten?
     if {$range eq "current"} {
         set pages [list $state(page)]
@@ -552,7 +569,7 @@ proc do_print {printer range dpi copies} {
     set w .progwin
     if {[winfo exists $w]} { destroy $w }
     toplevel $w
-    wm title $w "Drucken l\u00e4uft..."
+    wm title $w "Drucken läuft..."
     wm transient $w .
     label $w.l -text "Bereite Druck vor..." -padx 20 -pady 10
     pack  $w.l
@@ -566,9 +583,9 @@ proc do_print {printer range dpi copies} {
             "Rendere Seite [expr {$p+1}] / $state(total) bei ${dpi} DPI..."
         update
 
-        set tmpfile [file join /tmp "pdfprint_p${p}_[pid].png"]
+        set tmpfile [file join [tmpdir] "pdfprint_p${p}_[pid].png"]
 
-        # Seite mit Druckaufl\u00f6sung rendern
+        # Seite mit Druckauflösung rendern
         if {[catch {
             pdfium::render $state(doc) $p \
                 -dpi $dpi -imagename printpage
@@ -602,7 +619,7 @@ proc do_print {printer range dpi copies} {
         }
     }
 
-    # Tempor\u00e4re Dateien aufr\u00e4umen
+    # Temporäre Dateien aufräumen
     foreach f $tmpfiles {
         catch { file delete $f }
     }
@@ -611,7 +628,7 @@ proc do_print {printer range dpi copies} {
 }
 
 # ------------------------------------------------------------------ #
-# Brother QL Druck \u2014 Version 0.2                                      #
+# Brother QL Druck — Version 0.2                                      #
 # Korrekte Pixelbreiten laut brother_ql / labelutil:                 #
 #   54mm -> 590 px, 62mm -> 696 px etc.                              #
 # ------------------------------------------------------------------ #
@@ -636,7 +653,7 @@ proc cmd_print_ql {} {
     wm resizable $w 0 0
     wm transient $w .
 
-    # Seitengr\u00f6\u00dfe der aktuellen PDF-Seite
+    # Seitengröße der aktuellen PDF-Seite
     set sz  [pdfium::pagesize $state(doc) $state(page)]
     set pdf_wmm [format "%.1f" [lindex $sz 0]]
     set pdf_hmm [format "%.1f" [lindex $sz 1]]
@@ -647,6 +664,7 @@ proc cmd_print_ql {} {
     set ::_ql_dpi      300
     set ::_ql_range    "current"
     set ::_ql_cut      "EndOfPage"
+    set ::_ql_fit      0
 
     # Alle Drucker holen
     set all_printers [get_printers]
@@ -664,13 +682,13 @@ proc cmd_print_ql {} {
     frame $w.f -padx 12 -pady 8
     pack  $w.f -fill both
 
-    # Info: PDF-Seitengr\u00f6\u00dfe
+    # Info: PDF-Seitengröße
     label $w.f.info \
-        -text "PDF-Seite: ${pdf_wmm} \u00d7 ${pdf_hmm} mm" \
+        -text "PDF-Seite: ${pdf_wmm} × ${pdf_hmm} mm" \
         -foreground navy -font {TkDefaultFont 9 bold}
     grid $w.f.info - -sticky w -pady 4
 
-    # Drucker \u2014 alle verf\u00fcgbaren
+    # Drucker — alle verfügbaren
     label $w.f.pl -text "Drucker:" -anchor w
     ttk::combobox $w.f.pc \
         -textvariable ::_ql_printer \
@@ -695,8 +713,8 @@ proc cmd_print_ql {} {
     }
     grid $w.f.bl $w.f.bf -sticky nw -pady 3
 
-    # Aufl\u00f6sung
-    label $w.f.dl -text "Aufl\u00f6sung:" -anchor w
+    # Auflösung
+    label $w.f.dl -text "Auflösung:" -anchor w
     frame $w.f.df
     radiobutton $w.f.df.r300 -text "300 DPI" \
         -variable ::_ql_dpi -value 300 -command update_ql_info
@@ -715,7 +733,21 @@ proc cmd_print_ql {} {
     pack $w.f.cf.rend $w.f.cf.rnone -side left -padx 4
     grid $w.f.cl $w.f.cf -sticky w -pady 3
 
-    # Ausgabegr\u00f6\u00dfe (berechnet)
+    # Ausgabegröße (berechnet)
+    # Skalierung --------------------------------------------------- #
+    # Etiketten drucken normalerweise 1:1 -- jede Skalierung verschiebt
+    # den Druck auf dem Band. Passt die PDF-Breite aber nicht zum
+    # eingelegten Band, lehnt der Drucker den Auftrag sonst ab. Dann ist
+    # Einpassen die einzige Alternative zum Abbruch.
+    label $w.f.fl -text "Skalierung:" -anchor w
+    frame $w.f.ff
+    radiobutton $w.f.ff.r1 -text "1:1 (exakt)" \
+        -variable ::_ql_fit -value 0 -command update_ql_info
+    radiobutton $w.f.ff.r2 -text "auf Band einpassen" \
+        -variable ::_ql_fit -value 1 -command update_ql_info
+    pack $w.f.ff.r1 $w.f.ff.r2 -side left -padx 2
+    grid $w.f.fl $w.f.ff -sticky w -pady 3
+
     label $w.f.sl   -text "Ausgabe:" -anchor w
     label $w.f.sval -textvariable ::_ql_sizeinfo -anchor w -foreground darkgreen
     grid $w.f.sl $w.f.sval -sticky w -pady 3
@@ -743,7 +775,7 @@ proc cmd_print_ql {} {
     bind $w <Return> "$w.bf.ok invoke"
     bind $w <Escape> "$w.bf.can invoke"
 
-    # Ausgabegr\u00f6\u00dfe berechnen
+    # Ausgabegröße berechnen
     proc update_ql_info {} {
         global state
         set sz   [pdfium::pagesize $state(doc) $state(page)]
@@ -756,7 +788,7 @@ proc cmd_print_ql {} {
         set h_px [expr {int($hmm / $wmm * $w_px + 0.5)}]
         set h_mm [format "%.1f" $hmm]
         set ::_ql_sizeinfo \
-            "${band} \u00d7 ${h_mm} mm  (${w_px} \u00d7 ${h_px} px, ${dpi} DPI)"
+            "${band} × ${h_mm} mm  (${w_px} × ${h_px} px, ${dpi} DPI)"
     }
     update_ql_info
 
@@ -765,16 +797,110 @@ proc cmd_print_ql {} {
 
     if {$::_ql_ok} {
         do_print_ql $::_ql_printer $::_ql_band $::_ql_dpi \
-                    $::_ql_range  $::_ql_cut
+                    $::_ql_range  $::_ql_cut $::_ql_fit
     }
 }
 
-proc do_print_ql {printer band dpi range cut} {
+proc do_print_ql {printer band dpi range cut {fit 0}} {
     global state
 
-    # Pixelbreite f\u00fcr gew\u00e4hltes Band
-    set w_px [ql_width_px $band]
-    if {$dpi == 600} { set w_px [expr {$w_px * 2}] }
+    # ---------------------------------------------------------------- #
+    #  Windows: Band ueber das Papierformat, nicht ueber Pixelbreite.   #
+    #                                                                   #
+    #  Zuerst freies Format -paperw/-paperh: nur so bekommt das Etikett #
+    #  seine tatsaechliche Laenge. Die benannten Treiberformulare       #
+    #  ("54mm") tragen eine Nennlaenge von 29 mm -- alles Laengere      #
+    #  wuerde abgeschnitten.                                            #
+    #                                                                   #
+    #  Verwirft der Treiber dmPaperLength, wird auf das benannte        #
+    #  Formular zurueckgefallen; dann stimmt die Breite und die Laenge  #
+    #  bestimmt der Treiber. Der Anwender erfaehrt das.                 #
+    #                                                                   #
+    #  cut bleibt wirkungslos: das Schneideverhalten steckt in den      #
+    #  privaten Treiberdaten hinter dmDriverExtra und laesst sich nur   #
+    #  ueber ein Profil im Treiberdialog setzen.                        #
+    # ---------------------------------------------------------------- #
+    if {$::tcl_platform(platform) eq "windows"} {
+        if {$range eq "current"} {
+            set pages [list $state(page)]
+        } else {
+            set pages [list]
+            for {set i 0} {$i < $state(total)} {incr i} { lappend pages $i }
+        }
+
+        set done 0
+        set fallback 0
+
+        foreach p $pages {
+            # Laufrichtung ist die Kante, die nicht der Bandbreite gleicht
+            set sz [pdfium::pagesize $state(doc) $p]
+            lassign $sz w_mm h_mm
+            set len [expr {abs($w_mm - $band) < abs($h_mm - $band)
+                           ? $h_mm : $w_mm}]
+
+            # Passt die Seitenbreite nicht zum eingelegten Band, lehnt
+            # der Drucker einen 1:1-Auftrag ab. Statt kommentarlos zu
+            # scheitern wird das hier vorher geprueft.
+            set pw [expr {abs($w_mm - $band) < abs($h_mm - $band)
+                          ? $w_mm : $h_mm}]
+            if {!$fit && abs($pw - $band) > 2.0} {
+                set frage "Die Seite ist [format %.1f $pw] mm breit,\
+                           das gewaehlte Band ${band} mm.\n\n\
+                           Bei 1:1 lehnt der Drucker den Auftrag ab.\n\n\
+                           Auf Bandbreite einpassen?"
+                if {[tk_messageBox -icon question -type yesno \
+                        -title "Breite passt nicht" -message $frage] ne "yes"} {
+                    return
+                }
+                set fit 1
+            }
+
+            set base [list -printer $printer -from $p -to $p -fit $fit]
+
+            set rc [catch {
+                ::pdfium::print $state(doc) {*}$base \
+                    -paperw $band -paperh $len
+            } res]
+
+            if {$rc} {
+                set rc [catch {
+                    ::pdfium::print $state(doc) {*}$base -paper "${band}mm"
+                } res]
+                if {!$rc} { set fallback 1 }
+            }
+
+            if {$rc} {
+                tk_messageBox -icon error \
+                    -message "QL-Druckfehler Seite [expr {$p+1}]: $res"
+                return
+            }
+            incr done
+        }
+
+        set msg "QL-Druckauftrag gesendet ($done Etikett(en))."
+        if {$fallback} {
+            append msg "\n\nHinweis: Der Treiber hat das freie Format\
+                        abgelehnt. Verwendet wurde das Formular\
+                        \"${band}mm\" -- die Etikettenlaenge bestimmt dann\
+                        der Treiber, nicht das PDF."
+        }
+        if {$cut ne "" && $cut ne "EndOfPage"} {
+            append msg "\n\nHinweis: Die Schnitteinstellung \"$cut\" wird\
+                        unter Windows nicht gesetzt. Sie laesst sich nur im\
+                        Treiberdialog des Druckers hinterlegen."
+        }
+        tk_messageBox -icon info -message $msg
+        return
+    }
+
+    # ---------------------------------------------------------------- #
+    #  Unix: rendern und an CUPS geben                                  #
+    # ---------------------------------------------------------------- #
+
+    # Die Breite wird jetzt JE SEITE bestimmt (siehe Schleife), weil sie
+    # von der Skalierung abhängt:
+    #   einpassen (fit=1) -> Druckbreite des Bandes, Seite wird skaliert
+    #   1:1       (fit=0) -> tatsächliche Seitenbreite bei $dpi
 
     # Seiten
     if {$range eq "current"} {
@@ -786,11 +912,32 @@ proc do_print_ql {printer band dpi range cut} {
         }
     }
 
+    # Bei 1:1 vorher prüfen, ob die Seite überhaupt aufs Band passt.
+    # Sonst wird stillschweigend seitlich abgeschnitten. Gleiche Rückfrage
+    # wie im Windows-Zweig -- nur wird dort der Auftrag abgelehnt, hier
+    # beschnitten.
+    if {!$fit} {
+        foreach p $pages {
+            lassign [pdfium::pagesize $state(doc) $p] pw_mm ph_mm
+            if {abs($pw_mm - $band) > 2.0} {
+                set frage "Die Seite ist [format %.1f $pw_mm] mm breit,\
+                           das gewählte Band ${band} mm.\n\n\
+                           Bei 1:1 wird seitlich abgeschnitten.\n\n\
+                           Auf Bandbreite einpassen?"
+                if {[tk_messageBox -icon question -type yesno \
+                        -title "Breite passt nicht" -message $frage] eq "yes"} {
+                    set fit 1
+                }
+                break
+            }
+        }
+    }
+
     # Fortschrittsfenster
     set pw .qlprog
     if {[winfo exists $pw]} { destroy $pw }
     toplevel $pw
-    wm title $pw "QL Druck l\u00e4uft..."
+    wm title $pw "QL Druck läuft..."
     wm transient $pw .
     label $pw.l -text "Vorbereitung..." -padx 20 -pady 10
     pack  $pw.l
@@ -800,11 +947,27 @@ proc do_print_ql {printer band dpi range cut} {
     set ok 1
 
     foreach p $pages {
+        lassign [pdfium::pagesize $state(doc) $p] pw_mm ph_mm
+
+        if {$fit} {
+            # Auf Band einpassen: auf die DRUCKbreite rendern (54 mm -> 590 px)
+            # und dem Treiber die volle Bandbreite melden.
+            set w_mm $band
+            set w_px [ql_width_px $band]
+            if {$dpi == 600} { set w_px [expr {$w_px * 2}] }
+        } else {
+            # 1:1: die Seite behält ihre Maße. Breite in Pixeln direkt aus
+            # der Seitenbreite bei der gewählten Auflösung.
+            set w_mm $pw_mm
+            set w_px [expr {int($pw_mm / 25.4 * $dpi + 0.5)}]
+        }
+
         $pw.l configure -text \
-            "Rendere Seite [expr {$p+1}] \u2014 ${band}mm, ${w_px}px, ${dpi}DPI..."
+            "Rendere Seite [expr {$p+1}] — [format %.1f $w_mm]mm,\
+             ${w_px}px, ${dpi}DPI..."
         update
 
-        set tmpfile [file join /tmp "ql_p${p}_[pid].png"]
+        set tmpfile [file join [tmpdir] "ql_p${p}_[pid].png"]
 
         if {[catch {
             pdfium::render $state(doc) $p \
@@ -817,23 +980,27 @@ proc do_print_ql {printer band dpi range cut} {
             break
         }
 
-        # H\u00f6he in mm aus tats\u00e4chlicher PNG-H\u00f6he berechnen
+        # Höhe aus Seitenverhältnis und gemeldeter Breite -- NICHT aus
+        # 300 dpi. Die gerenderte Breite ist beim Einpassen die Druckbreite
+        # (49,95 mm für 54), gemeldet wird aber das Band. Wer da zwei
+        # Maßstäbe mischt, bekommt zu kurze Etiketten, und bei 600 dpi
+        # doppelt so lange.
+        set iw [image width qlpage]
         set ih [image height qlpage]
-        set h_mm [format "%.1f" [expr {$ih / 300.0 * 25.4}]]
-        lappend tmpfiles [list $tmpfile $h_mm]
+        set h_mm [format "%.1f" [expr {double($ih) / $iw * $w_mm}]]
+        lappend tmpfiles [list $tmpfile [format %.1f $w_mm] $h_mm]
     }
 
     if {$ok && [llength $tmpfiles] > 0} {
         foreach entry $tmpfiles {
-            set f   [lindex $entry 0]
-            set hmm [lindex $entry 1]
+            lassign $entry f wmm hmm
 
             $pw.l configure -text \
-                "Sende an $printer  (${band} \u00d7 ${hmm} mm)..."
+                "Sende an $printer  (${wmm} × ${hmm} mm)..."
             update
 
             set cmd [list lp -d $printer \
-                -o "PageSize=Custom.${band}x${hmm}mm" \
+                -o "PageSize=Custom.${wmm}x${hmm}mm" \
                 -o MediaType=Roll \
                 -o CutMedia=$cut \
                 $f]
@@ -845,7 +1012,8 @@ proc do_print_ql {printer band dpi range cut} {
         }
         tk_messageBox -icon info \
             -message "Gesendet: [llength $tmpfiles] Etikett(en),\
-${band}mm Band, ${dpi} DPI."
+${band}mm Band, ${dpi} DPI,\
+[expr {$fit ? {eingepasst} : {1:1}}]."
     }
 
     foreach entry $tmpfiles {

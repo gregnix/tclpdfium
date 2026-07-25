@@ -200,6 +200,48 @@ files usually live in the same `lib` directory; give both options the same path.
 `libtclstub.a` (no version number — that is the new convention), Tcl 8.6 ships
 `libtclstub86.a`. MinGW gcc handles both.
 
+## Windows, natively (MSVC / nmake)
+
+For a Visual Studio toolchain instead of MSYS2. Everything runs in the
+**"x64 Native Tools Command Prompt for VS"** — a normal `cmd.exe` does not have
+the compiler on `PATH`.
+
+You need three things: the VS build tools, a Tcl/Tk installation to build
+against (Magicsplat or your own), and a pdfium package for MSVC. The pdfium
+package must contain `include\` (the headers) and `lib\pdfium.dll.lib` (the
+**import** library — the `.dll.lib`, not a static `.lib`). The prebuilt
+binaries from `bblanchon/pdfium-binaries` provide exactly this layout.
+
+```bat
+cd win
+nmake /f makefile.vc INSTALLDIR=c:\Tcl PDFIUMDIR=c:\path\to\pdfium
+nmake /f makefile.vc INSTALLDIR=c:\Tcl PDFIUMDIR=c:\path\to\pdfium test
+nmake /f makefile.vc INSTALLDIR=c:\Tcl PDFIUMDIR=c:\path\to\pdfium install
+```
+
+`INSTALLDIR` is the root of the Tcl installation (the directory whose `lib\`
+and `include\` hold Tcl); `makefile.vc` finds the stubs and headers under it.
+
+**This extension needs Tk, not just Tcl** (it works with photo images). When
+Tk lives in the same tree as Tcl — the usual case, e.g. a Magicsplat or
+ActiveTcl install under `c:\Tcl` — nothing more is needed; the makefile picks
+up `tk.h` and `tkstub86.lib` from `INSTALLDIR`. If Tk is installed elsewhere,
+point at it with `TKDIR=c:\path\to\tk`. A build that links only the Tcl
+stubs fails at the end with unresolved `Tk_FindPhoto`, `Tk_PhotoPutBlock` and
+similar symbols — that is the missing-Tk signature, not a corrupt install.
+`PDFIUMDIR` is the pdfium package. If you leave `PDFIUMDIR` out, the makefile
+looks under `vendor\pdfium-windows-x64\` and stops with a clear error if it is
+not there — it will not silently build an extension that cannot link.
+
+**`pdfium.dll` at run time.** The build links against the *import* library;
+the actual `pdfium.dll` must be found when the extension loads. Copy it next
+to the installed `pdfiumtcl<ver>.dll`, or put its directory on `PATH`. This is
+the Windows counterpart of the `libpdfium.so` step on Linux — same idea, same
+failure if you skip it (`the specified module could not be found`).
+
+**gdi32 and winspool are linked in** for the GDI/DEVMODE printing path. They
+are Windows system libraries, always present; no extra download.
+
 ## Windows, from a Linux machine
 
 No Windows box, no MSYS2:
