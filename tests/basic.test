@@ -12,9 +12,25 @@ set pdf  [file join $here fixtures sample.pdf]
 
 testConstraint havePdf [file exists $pdf]
 
-test pdfiumtcl-1.1 {Paket ist geladen und meldet seine Version} -body {
-    package provide pdfiumtcl
-} -result 0.5.3
+test pdfiumtcl-1.1 {Paket ist geladen und meldet die Version aus configure.ac} -body {
+    # Gegen die QUELLE pruefen, nicht gegen eine wiederholte Nummer.
+    # Fest verdrahtet stand hier 0.5.3, waehrend das Paket schon auf
+    # 0.6.0 war -- der Test faellt bei jedem Bump, obwohl nichts kaputt
+    # ist, und sagt nichts ueber das Paket aus.
+    set ac [file join [file dirname [file dirname [file normalize [info script]]]] \
+            configure.ac]
+    if {![file readable $ac]} {
+        # Im installierten Zustand gibt es configure.ac nicht. Dann nur
+        # pruefen, dass ueberhaupt eine Version gemeldet wird.
+        expr {[package provide pdfiumtcl] ne ""}
+    } else {
+        set fh [open $ac r]
+        set txt [read $fh]
+        close $fh
+        regexp {AC_INIT\(\[pdfiumtcl\],\[([0-9.]+)\]\)} $txt -> want
+        expr {[package provide pdfiumtcl] eq $want}
+    }
+} -result 1
 
 test pdfiumtcl-1.2 {Kommandos liegen in ::pdfium} -body {
     expr {[llength [info commands ::pdfium::open]] == 1}
@@ -25,7 +41,21 @@ test pdfiumtcl-1.3 {und NICHT in ::pdfium::pdfium -- der Namespace-Fallstrick} -
 } -result 0
 
 test pdfiumtcl-1.4 {Laden zieht kein Tk herein} -body {
-    info exists ::tk_version
+    # In einem EIGENEN Interpreter pruefen, nicht im aeusseren.
+    #
+    # "info exists ::tk_version" misst den Interpreter, in dem der Test
+    # laeuft -- unter wish ist Tk schon da, bevor der Test beginnt, und
+    # er faellt durch, ohne dass am Paket etwas falsch waere. Seit
+    # pdfview.test dazugekommen ist, das Tk BRAUCHT, koennen sonst nicht
+    # beide Dateien mit demselben Aufruf gruen sein.
+    set ip [interp create]
+    $ip eval [list set auto_path $::auto_path]
+    set r [$ip eval {
+        catch {package require pdfiumtcl}
+        info exists ::tk_version
+    }]
+    interp delete $ip
+    set r
 } -result 0
 
 test pdfiumtcl-2.1 {open/pagecount/close} -constraints havePdf -body {
@@ -52,5 +82,129 @@ test pdfiumtcl-3.1 {addimagebitmap ohne Tk: Fehler, kein Absturz} -body {
     catch {pdfium::addimagebitmap 0 0 nichtda 0 0 10 10} e
     expr {[string length $e] > 0}
 } -result 1
+
+
+# ---------------------------------------------------------------------------
+# pdfiumtcl-2.x  unknown options are refused, not swallowed
+#
+# render used to ignore anything it did not know. "render -scale 2.0" --
+# an option that only pdfium::print has -- produced the same image for
+# every factor, and there was no way of telling why the zoom did nothing.
+# ---------------------------------------------------------------------------
+
+set ::sample [file join [file dirname [file normalize [info script]]] \
+        fixtures sample.pdf]
+testConstraint havePdf [file readable $::sample]
+
+# Ein getaggtes PDF fuer die Strukturpruefungen. Ohne eines gibt es
+# nichts zu messen -- dann UEBERSPRINGEN statt gruen melden.
+set ::tagged [file join [file dirname [file normalize [info script]]] \
+        fixtures tagged.pdf]
+testConstraint haveTagged [file readable $::tagged]
+
+test pdfiumtcl-2.1 {render refuses an unknown option} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    catch {pdfium::render $d 0 -scale 2.0} e
+    expr {[string match {*unknown option*-scale*} $e]}
+} -cleanup {pdfium::close $d} -result 1
+
+test pdfiumtcl-2.2 {render names the options it knows} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    catch {pdfium::render $d 0 -quatsch 1} e
+    expr {[string match {*-dpi*-width*-imagename*} $e]}
+} -cleanup {pdfium::close $d} -result 1
+
+test pdfiumtcl-2.3 {a missing value is refused} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    # Dropping the last word silently hides a typo in the caller.
+    catch {pdfium::render $d 0 -dpi} e
+    expr {[string match {*missing*} $e]}
+} -cleanup {pdfium::close $d} -result 1
+
+test pdfiumtcl-2.4 {search refuses an unknown option} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    catch {pdfium::search $d 0 wort -quatsch 1} e
+    expr {[string match {*unknown option*} $e]}
+} -cleanup {pdfium::close $d} -result 1
+
+test pdfiumtcl-2.5 {search checks the value of -case} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    # The result of Tcl_GetIntFromObj was not checked: "-case ja" left
+    # the flag at 0 and reported success.
+    catch {pdfium::search $d 0 wort -case ja} e
+    expr {[string match {*expected integer*} $e]}
+} -cleanup {pdfium::close $d} -result 1
+
+
+# ---------------------------------------------------------------------------
+# pdfiumtcl-3.x  mctext: MCID -> Text
+#
+# structure names the MCIDs of every element, gettext returns the text of
+# the whole page -- but nothing connected the two. With both, the READING
+# ORDER can be checked: does the text follow the structure tree, or the
+# order it happens to sit in the content stream? A screen reader follows
+# the tree, and no validator checks this.
+# ---------------------------------------------------------------------------
+
+test pdfiumtcl-3.1 {mctext returns pairs} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    set mc [pdfium::mctext $d 0]
+    expr {[llength $mc] % 2 == 0}
+} -cleanup {pdfium::close $d} -result 1
+
+test pdfiumtcl-3.2 {mctext refuses a wrong argument count} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    catch {pdfium::mctext $d} e
+    expr {[string match {*doc-handle pagenum*} $e]}
+} -cleanup {pdfium::close $d} -result 1
+
+test pdfiumtcl-3.3 {reading order matches the structure tree} \
+        -constraints haveTagged -body {
+    # The point of the whole command. Measured on a tagged document:
+    # every MCID that carries text appears in the same order in the tree
+    # and in the content stream.
+    set d [pdfium::open $::tagged]
+
+    proc walkMc {el varName} {
+        upvar 1 $varName out
+        foreach m [dict get $el mcids] { lappend out $m }
+        foreach k [dict get $el children] { walkMc $k out }
+    }
+    set tree {}
+    foreach el [pdfium::structure $d 0] { walkMc $el tree }
+
+    set stream {}
+    foreach {id txt} [pdfium::mctext $d 0] {
+        if {$id >= 0} { lappend stream $id }
+    }
+    # An element may own an MCID without carrying text of its own -- a
+    # Table does. Compare only those that do.
+    set treeWithText {}
+    foreach m $tree { if {$m in $stream} { lappend treeWithText $m } }
+
+    pdfium::close $d
+    rename walkMc {}
+    expr {$treeWithText eq $stream}
+} -result 1
+
+test pdfiumtcl-3.4 {no text object without a marked-content ID} \
+        -constraints haveTagged -body {
+    # Text outside the tree is what a screen reader cannot reach. Key -1
+    # collects it, so it does not vanish silently.
+    set d [pdfium::open $::tagged]
+    set loose 0
+    foreach {id txt} [pdfium::mctext $d 0] {
+        if {$id < 0} { incr loose }
+    }
+    pdfium::close $d
+    set loose
+} -result 0
 
 cleanupTests

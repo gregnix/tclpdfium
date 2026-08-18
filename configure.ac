@@ -2,7 +2,7 @@
 dnl	configure.ac für pdfiumtcl
 dnl	(nach dem offiziellen sampleextension: https://github.com/tcltk/sampleextension)
 
-AC_INIT([pdfiumtcl],[0.6.0])
+AC_INIT([pdfiumtcl],[0.6.1])
 
 TEA_INIT()
 

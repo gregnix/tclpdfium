@@ -7,7 +7,7 @@ metadata, search, bookmarks, form fields and annotations directly from
 Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
 delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.6.0  
+**Version:** 0.6.1  
 **License:** BSD  
 **Platform:** Linux x86_64, Windows x64 (MinGW, cross-built or native)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
@@ -32,6 +32,8 @@ pdfium::links     doc-handle pagenum   -> {url ...}
 pdfium::bookmarks doc-handle           -> {{title pagenum level} ...}
 pdfium::formfields doc-handle pagenum  -> {{type name value} ...}
 pdfium::annot_list doc-handle pagenum  -> {{type rect content author date} ...}
+pdfium::structure  doc-handle pagenum  -> tagged-PDF structure tree (nested dicts)
+pdfium::mctext     doc-handle pagenum  -> {mcid text ...} in content-stream order
 ```
 
 > **Tk is only needed for `render` and `addimagebitmap`.** Both work on Tk photo
@@ -209,9 +211,45 @@ if {[catch {pdfium::open $f} doc]} {
 
 ## Viewer
 
+A ready-made viewer application:
+
 ```bash
-TCLLIBPATH=. wish app/viewer.tcl document.pdf
+TCLLIBPATH=. wish app/viewer4.tcl document.pdf
 ```
+
+### pdfview -- a PDF page as a widget
+
+`lib/pdfview-0.1.tm` is the same thing as a **widget**, for embedding in
+an application rather than running on its own:
+
+```tcl
+tcl::tm::path add /path/to/tclpdfium/lib
+package require pdfview
+
+pdfview .p -file invoice.pdf
+pack .p -fill both -expand 1
+.p configure -page 3 -zoom fit
+```
+
+| Option | |
+|---|---|
+| `-file` | path; empty for an empty widget |
+| `-page` | page number from 0, clamped to the document |
+| `-zoom` | `fit`, `width`, or a number (1.0 = natural size) |
+| `-dpi` | fallback while the window has no size yet |
+| `-background` | |
+| `-pagechangedcommand` | called with `{page total}` |
+
+Anything else goes to the enclosing `ttk::frame` (`-relief`,
+`-borderwidth`).
+
+Methods: `pagecount`, `see 0|end`, `next`, `prev`, `text ?page?`,
+`pagesize ?page?`, and `handle` -- the last one returns the pdfium
+document handle for everything the widget does not wrap: `search`,
+`bookmarks`, `annot_list`, `formfields`, `structure`, `mctext`.
+
+State belongs to the instance, so several views can sit in one
+application without interfering. TclOO, no dependency beyond Tcl and Tk.
 
 ---
 
@@ -225,7 +263,9 @@ tclpdfium/
   pkgIndex.tcl.in     VFS-capable loader
   tclconfig/          TEA machinery (tcl.m4) — do not patch
   generic/            C source (tclpdfiumtcl.c)
-  app/                Tcl applications (viewer.tcl, viewer2.tcl)
+  app/                Tcl applications (viewer4.tcl, etikett.tcl,
+                      print-demo.tcl)
+  lib/                pdfview, the viewer as an embeddable widget
   scripts/            setup.sh, get-pdfium.cmd, createpdf.sh
   tools/              build-windows.sh, make-win-stubs.sh,
                       find-tclconfig.tcl, test-windows.tcl, test-vfs.tcl
@@ -250,6 +290,40 @@ tclpdfium/
 ---
 
 ## Changes
+
+### 0.6.1
+
+- **`::pdfium::mctext`** returns the text of a page grouped by
+  marked-content ID, in the order the objects sit in the content stream.
+  Together with `structure`, which gives the order of the structure tree,
+  this makes the READING ORDER measurable: does a document read the way it
+  is tagged, or the way it happens to be drawn? A screen reader follows the
+  tree, and no validator checks this -- a conformant file can be tagged in
+  one order and drawn in another. Text objects without a marked-content ID
+  land under the key `-1`; in a tagged document that key should not appear,
+  since it is content a screen reader cannot reach.
+
+- **Unknown options are refused rather than ignored.** `render` knows
+  `-dpi`, `-width` and `-imagename` and used to drop anything else without
+  a word: `render -scale 2.0` -- an option only `print` has -- produced the
+  same image for every factor, with no way of telling why. `render` and
+  `search` now name the offending option and the ones they accept, and an
+  odd number of trailing words is refused instead of silently dropping the
+  last one. `search -case` also checks its value, which it did not.
+
+- **`::pdfium::structure`** returns the tagged-PDF structure tree of a page
+  as nested Tcl dicts: role, `/Alt`, `/ActualText`, `/Lang`, `/ID`,
+  attributes such as `/Scope` and `/ListNumbering`, and the marked-content
+  ids. `mcids` is a **list** — an element spanning a page break has more
+  than one, and PDFium's single-value getter drops the rest silently. Pages
+  without a structure tree return an empty list rather than an error, since
+  most PDFs have none. See `examples/structure-dump.tcl`.
+
+  The point of the command is a second opinion: PDFium is the engine in
+  Chrome and Edge, so it reads a tagged document the way a large share of
+  readers do. In its first use it showed that structure elements living in
+  a form XObject do not appear at all — in a file that veraPDF accepts as
+  PDF/UA.
 
 ### 0.6.0
 

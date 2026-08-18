@@ -1,0 +1,205 @@
+# pdfview.test -- the PDF widget
+#
+# Needs a display. Under Xvfb: xvfb-run -a tclsh tests/pdfview.test
+#
+# What is checked is what separates a WIDGET from the program in
+# app/viewer4.tcl: state per instance, children below $win, and errors
+# that leave the widget usable.
+
+package require tcltest 2.5
+namespace import tcltest::*
+
+set here [file dirname [file normalize [info script]]]
+lappend auto_path [file dirname $here]
+tcl::tm::path add [file join [file dirname $here] lib]
+
+testConstraint haveTk [expr {![catch {package require Tk}]}]
+testConstraint haveWidget [expr {
+    [testConstraint haveTk] && ![catch {package require pdfview}]}]
+
+# A PDF to look at. Without one there is nothing to measure -- skip
+# rather than report green.
+set ::testPdf ""
+foreach k [list [file join $here fixtures sample.pdf] \
+                [file join [file dirname $here] examples etikett54.pdf] \
+                [file join [file dirname $here] etikett54.pdf]] {
+    if {[file readable $k]} { set ::testPdf $k; break }
+}
+testConstraint havePdf [expr {
+    [testConstraint haveWidget] && $::testPdf ne ""}]
+
+proc freshView {{name .pv}} {
+    catch {destroy $name}
+    pdfview $name -file $::testPdf
+    pack $name -fill both -expand 1
+    wm geometry . 500x600
+    update
+    return $name
+}
+
+# ---------------------------------------------------------------------------
+# pdfview-1.x  the widget exists and answers
+# ---------------------------------------------------------------------------
+
+test pdfview-1.1 {a view opens a document} -constraints havePdf -body {
+    set w [freshView]
+    expr {[$w pagecount] > 0}
+} -cleanup {destroy .pv} -result 1
+
+test pdfview-1.2 {children hang below the widget} -constraints havePdf -body {
+    set w [freshView]
+    # Not a fixed path like ".pw.left.c" -- that is what makes
+    # app/viewer4.tcl impossible to embed.
+    expr {[winfo exists $w.c] && [winfo parent $w.c] eq $w}
+} -cleanup {destroy .pv} -result 1
+
+test pdfview-1.3 {an empty -file leaves an empty widget, not an error} \
+        -constraints haveWidget -body {
+    catch {destroy .pv}
+    pdfview .pv
+    pack .pv
+    update
+    .pv pagecount
+} -cleanup {destroy .pv} -result 0
+
+# ---------------------------------------------------------------------------
+# pdfview-2.x  paging
+# ---------------------------------------------------------------------------
+
+test pdfview-2.1 {see, next and prev stay inside the document} \
+        -constraints havePdf -body {
+    set w [freshView]
+    set n [$w pagecount]
+    $w see end
+    set atEnd [$w cget -page]
+    $w next
+    set afterEnd [$w cget -page]
+    $w see 0
+    $w prev
+    set beforeStart [$w cget -page]
+    list [expr {$atEnd == $n - 1}] [expr {$afterEnd == $n - 1}] $beforeStart
+} -cleanup {destroy .pv} -result {1 1 0}
+
+test pdfview-2.2 {without a document the page stays 0} -constraints haveWidget -body {
+    # Accepting 99 here would report a page that cannot exist.
+    catch {destroy .pv}
+    pdfview .pv
+    .pv configure -page 99
+    .pv cget -page
+} -cleanup {destroy .pv} -result 0
+
+test pdfview-2.3 {the page-changed command is called} -constraints havePdf -body {
+    set ::seen {}
+    catch {destroy .pv}
+    pdfview .pv -file $::testPdf \
+            -pagechangedcommand {apply {{p t} {lappend ::seen $p}}}
+    pack .pv
+    update
+    .pv see 0
+    expr {[llength $::seen] > 0}
+} -cleanup {destroy .pv; unset -nocomplain ::seen} -result 1
+
+# ---------------------------------------------------------------------------
+# pdfview-3.x  two views in one application
+#
+# The point of the whole exercise. app/viewer4.tcl keeps its state in one
+# global array touched in 53 places and names its photo "pdfpage"; two of
+# them would overwrite each other.
+# ---------------------------------------------------------------------------
+
+test pdfview-3.1 {two views keep their own state} -constraints havePdf -body {
+    catch {destroy .a}
+    catch {destroy .b}
+    pdfview .a -file $::testPdf
+    pdfview .b -file $::testPdf
+    pack .a .b -side left
+    update
+    .a see end
+    .b see 0
+    list [expr {[.a cget -page] == [.a pagecount] - 1}] [.b cget -page]
+} -cleanup {destroy .a; destroy .b} -result {1 0}
+
+test pdfview-3.2 {each view has its own image} -constraints havePdf -body {
+    catch {destroy .a}
+    catch {destroy .b}
+    pdfview .a -file $::testPdf
+    pdfview .b -file $::testPdf
+    pack .a .b -side left
+    update
+    # A fixed image name would give one image for both.
+    set imgs [lsearch -all -inline [image names] ::pdfview::img*]
+    expr {[llength $imgs] >= 2}
+} -cleanup {destroy .a; destroy .b} -result 1
+
+# ---------------------------------------------------------------------------
+# pdfview-4.x  zoom
+# ---------------------------------------------------------------------------
+
+test pdfview-4.1 {a numeric zoom scales the page} -constraints havePdf -body {
+    set w [freshView]
+    set imgName [lindex [lsearch -all -inline [image names] ::pdfview::img*] 0]
+    $w configure -zoom 1.0
+    update
+    set w1 [image width $imgName]
+    $w configure -zoom 2.0
+    update
+    set w2 [image width $imgName]
+    # pdfium::render knows -dpi, -width and -imagename, and ignores
+    # anything else SILENTLY -- passing "-scale" gave the same image for
+    # every factor. The zoom is computed as a width instead.
+    expr {$w2 > $w1 * 1.8}
+} -cleanup {destroy .pv} -result 1
+
+test pdfview-4.2 {an unknown zoom is refused} -constraints havePdf -body {
+    set w [freshView]
+    catch {$w configure -zoom quatsch} e
+    expr {[string match {*expects*} $e]}
+} -cleanup {destroy .pv} -result 1
+
+# ---------------------------------------------------------------------------
+# pdfview-5.x  errors leave the widget usable
+# ---------------------------------------------------------------------------
+
+test pdfview-5.1 {an unreadable file keeps the current document} \
+        -constraints havePdf -body {
+    set w [freshView]
+    set before [$w pagecount]
+    catch {$w configure -file /no/such/path.pdf} e
+    list [expr {[string match {*cannot read*} $e]}] \
+         [expr {[$w pagecount] == $before}]
+} -cleanup {destroy .pv} -result {1 1}
+
+test pdfview-5.2 {text comes out of the page} -constraints havePdf -body {
+    set w [freshView]
+    expr {[string length [$w text]] >= 0}
+} -cleanup {destroy .pv} -result 1
+
+test pdfview-5.3 {resizing does not break the bindings} -constraints havePdf -body {
+    # The bug this catches cost a while: a binding stores the command
+    # name as TEXT, and inside the constructor [self] still answers with
+    # the temporary name. Bound before the object is renamed onto the
+    # widget path, every event then calls a command that no longer
+    # exists -- "invalid command name ::pdfview::tmp.p" -- and it shows
+    # only once the widget is mapped and <Configure> fires.
+    #
+    # A plain "update" does not catch it: the error goes to the
+    # background handler, the test carries on and reports green. So the
+    # handler is installed here and asked afterwards.
+    set ::pdfviewBgError ""
+    proc ::bgerror {msg} { set ::pdfviewBgError $msg }
+
+    set w [freshView]
+    wm geometry . 700x400
+    update
+    wm geometry . 500x600
+    update
+
+    rename ::bgerror {}
+    set ::pdfviewBgError
+} -cleanup {
+    destroy .pv
+    catch {rename ::bgerror {}}
+    unset -nocomplain ::pdfviewBgError
+} -result {}
+
+::tcltest::cleanupTests

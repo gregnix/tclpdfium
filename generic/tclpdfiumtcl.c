@@ -49,6 +49,7 @@
 #include <fpdf_save.h>
 #include <fpdf_ppo.h>
 #include <fpdf_transformpage.h>
+#include <fpdf_structtree.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,6 +69,27 @@
  * der typedef unten zu "typedef int int;" und der Uebersetzer bricht ab. */
 #if !defined(TCL_SIZE_MAX) && !defined(Tcl_Size)
     typedef int Tcl_Size;
+#endif
+
+/* Name und Version kommen von configure. TEA definiert beide auf der
+ * Befehlszeile (@DEFS@ enthaelt -DPACKAGE_VERSION="..."), so dass die
+ * Nummer NUR in configure.ac steht.
+ *
+ * Vorher stand sie hier ein zweites Mal, fest verdrahtet -- bei jedem
+ * Bump muss man dann an beide denken, und wer eine vergisst, bekommt
+ * beim Laden:
+ *   attempt to provide package pdfiumtcl 0.6.0 failed:
+ *   package pdfiumtcl 0.6.1 provided instead
+ *
+ * Der Rueckfall gilt nur beim Uebersetzen von Hand ohne configure. Er
+ * ist bewusst auffaellig, damit eine so gebaute Bibliothek nicht
+ * unbemerkt eine falsche Nummer meldet.
+ */
+#ifndef PACKAGE_NAME
+#  define PACKAGE_NAME "pdfiumtcl"
+#endif
+#ifndef PACKAGE_VERSION
+#  define PACKAGE_VERSION "0.0.0-nonconfigured"
 #endif
 
 /* Windows DLL-Export — noetig fuer MinGW ohne --export-all-symbols */
@@ -203,6 +225,15 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
     char imgname[64];
     snprintf(imgname, sizeof(imgname), "pdfimg%d", pagenum);
 
+    /* An odd number of trailing words means a value is missing. Silently
+     * dropping the last word hides a typo in the caller. */
+    if (((objc - 3) % 2) != 0) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("value for \"%s\" missing",
+                Tcl_GetString(objv[objc - 1])));
+        return TCL_ERROR;
+    }
+
     for (int i = 3; i < objc - 1; i += 2) {
         const char *opt = Tcl_GetString(objv[i]);
         if (strcmp(opt, "-dpi") == 0) {
@@ -213,6 +244,16 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
                 return TCL_ERROR;
         } else if (strcmp(opt, "-imagename") == 0) {
             strncpy(imgname, Tcl_GetString(objv[i+1]), sizeof(imgname)-1);
+        } else {
+            /* Say so instead of ignoring it. An unknown option used to
+             * pass unnoticed: "render -scale 2.0" -- an option that only
+             * pdfium::print has -- produced the same image for every
+             * factor, and the caller had no way of telling why the zoom
+             * did nothing. */
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown option \"%s\": must be -dpi, -width"
+                              " or -imagename", opt));
+            return TCL_ERROR;
         }
     }
 
@@ -362,6 +403,84 @@ PdfiumGetTextCmd(ClientData cd, Tcl_Interp *interp,
 }
 
 /* ------------------------------------------------------------------ */
+/* pdfium::mctext doc-handle pagenum                                   */
+/*                                                                     */
+/* The text of a page grouped by marked-content ID, as a flat dict:    */
+/*                                                                     */
+/*     mcid1 text1 mcid2 text2 ...                                     */
+/*                                                                     */
+/* Why this is needed: pdfium::structure names the MCIDs of every      */
+/* element, and pdfium::gettext returns the text of the whole page --  */
+/* but nothing connected the two. With both, the READING ORDER can be  */
+/* checked: does the text follow the structure tree, or the order it   */
+/* happens to sit in the content stream? A screen reader follows the   */
+/* tree, a validator does not check this, and it is the failure that   */
+/* costs a reader the most.                                            */
+/*                                                                     */
+/* Objects without a marked-content ID are collected under the key -1, */
+/* so nothing is lost silently; that key is exactly the content a      */
+/* tagged document should not have.                                    */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumMcTextCmd(ClientData cd, Tcl_Interp *interp,
+                int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+        return TCL_ERROR;
+    }
+
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    FPDF_TEXTPAGE tp = FPDFText_LoadPage(page);
+    if (!tp) {
+        FPDF_ClosePage(page);
+        PDFIUM_ERROR(interp, "cannot load text page");
+    }
+
+    /* One entry per MCID, in the order the objects appear in the
+     * content stream -- that order is the point of the exercise. */
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+
+    int nobj = FPDFPage_CountObjects(page);
+    for (int i = 0; i < nobj; i++) {
+        FPDF_PAGEOBJECT po = FPDFPage_GetObject(page, i);
+        if (!po) continue;
+        if (FPDFPageObj_GetType(po) != FPDF_PAGEOBJ_TEXT) continue;
+
+        int mcid = FPDFPageObj_GetMarkedContentID(po);
+
+        /* Ask for the size first, then fetch. The call returns the
+         * number of BYTES including the terminating pair. */
+        unsigned long need = FPDFTextObj_GetText(po, tp, NULL, 0);
+        if (need < 2) continue;
+
+        unsigned short *buf16 = (unsigned short *)ckalloc(need + 2);
+        FPDFTextObj_GetText(po, tp, (FPDF_WCHAR *)buf16, need);
+        Tcl_Obj *txt = _AnnotUtf16ToObj(interp, buf16, need);
+        ckfree((char *)buf16);
+
+        Tcl_ListObjAppendElement(interp, result, Tcl_NewIntObj(mcid));
+        Tcl_ListObjAppendElement(interp, result, txt);
+    }
+
+    Tcl_SetObjResult(interp, result);
+    FPDFText_ClosePage(tp);
+    FPDF_ClosePage(page);
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
 /* pdfium::pagesize doc-handle pagenum                                 */
 /* Gibt {width_mm height_mm} zurück.                                  */
 /* ------------------------------------------------------------------ */
@@ -500,8 +619,16 @@ PdfiumSearchCmd(ClientData cd, Tcl_Interp *interp,
     int casesensitive = 0;
     if (objc >= 6) {
         const char *opt = Tcl_GetString(objv[4]);
-        if (strcmp(opt, "-case") == 0)
-            Tcl_GetIntFromObj(interp, objv[5], &casesensitive);
+        if (strcmp(opt, "-case") == 0) {
+            /* The result was not checked: "search doc 0 wort -case ja"
+             * left casesensitive at 0 and reported success. */
+            if (Tcl_GetIntFromObj(interp, objv[5], &casesensitive) != TCL_OK)
+                return TCL_ERROR;
+        } else {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown option \"%s\": must be -case", opt));
+            return TCL_ERROR;
+        }
     }
 
     /* Suchbegriff als UTF-16LE -- portabel (Tcl 8 + 9); NICHT
@@ -656,6 +783,265 @@ CollectBookmarks(FPDF_DOCUMENT doc, FPDF_BOOKMARK bm,
 
         bm = FPDFBookmark_GetNextSibling(doc, bm);
     }
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::structure doc-handle pagenum                                */
+/*                                                                     */
+/* Gibt den Strukturbaum einer Seite so zurueck, wie PDFium ihn sieht  */
+/* -- also so, wie ihn die Engine sieht, die in Chrome und Edge steckt. */
+/* Das ist der Zweck: eine ZWEITE, unabhaengige Lesung neben der        */
+/* eigenen. Ein Baum, den man selbst geschrieben hat, mit dem eigenen   */
+/* Werkzeug zu lesen bestaetigt einen per Konstruktion.                 */
+/*                                                                     */
+/* Rueckgabe: verschachtelte Liste, je Element ein Dict:                */
+/*                                                                     */
+/*   type      /S des Elements ("P", "H1", "Table", ...)                */
+/*   title     /T, wenn vorhanden                                       */
+/*   alt       /Alt (Alternativtext)                                    */
+/*   actual    /ActualText                                              */
+/*   lang      /Lang                                                    */
+/*   id        /ID                                                      */
+/*   mcids     Liste ALLER marked-content-IDs des Elements              */
+/*   attrs     Dict der Attribute (/Scope, /Headers, ...)               */
+/*   children  Liste der Kindelemente, gleiche Form                     */
+/*                                                                     */
+/* mcids ist bewusst eine LISTE. FPDF_StructElement_GetMarkedContentID  */
+/* liefert nur eine einzige, und ein Absatz, der ueber einen            */
+/* Seitenumbruch laeuft, hat zwei -- die zweite Haelfte faellt damit    */
+/* still unter den Tisch. Deshalb GetMarkedContentIdCount/AtIndex.      */
+/* ------------------------------------------------------------------ */
+
+/* UTF-16LE aus PDFium in ein Tcl-Objekt. len ist die Byte-Anzahl
+ * einschliesslich der abschliessenden zwei Nullbytes, so wie PDFium
+ * sie meldet. Liefert NULL, wenn nichts da ist. */
+static Tcl_Obj *
+PdfiumUtf16ToObj(const unsigned short *buf, unsigned long len)
+{
+    Tcl_DString ds;
+    Tcl_Obj *obj;
+
+    if (buf == NULL || len < 2) {
+        return NULL;
+    }
+    Tcl_DStringInit(&ds);
+    /* Tcl 9 kennt "utf-16le", Tcl 8.6 nennt es "unicode" -- auf
+     * little-endian dasselbe. Gemessen: beide liefern fuer "AB" die
+     * Bytes 41 00 42 00. */
+    Tcl_Encoding enc = Tcl_GetEncoding(NULL, "utf-16le");
+    if (!enc) {
+        enc = Tcl_GetEncoding(NULL, "unicode");
+    }
+    if (enc) {
+        Tcl_ExternalToUtfDString(enc, (const char *)buf,
+                                 (int)(len - 2), &ds);
+        Tcl_FreeEncoding(enc);
+    } else {
+        int nchars = (int)((len / 2) - 1);
+        if (nchars < 0) nchars = 0;
+        Tcl_UniCharToUtfDString((const Tcl_UniChar *)buf, nchars, &ds);
+    }
+    obj = Tcl_NewStringObj(Tcl_DStringValue(&ds), Tcl_DStringLength(&ds));
+    Tcl_DStringFree(&ds);
+    return obj;
+}
+
+/* Ein String-Feld eines Elements holen. getter ist eine der
+ * FPDF_StructElement_Get*-Funktionen mit der ueblichen
+ * (element, buffer, buflen) -> laenge Signatur. */
+typedef unsigned long (*PdfiumStructGetter)(FPDF_STRUCTELEMENT,
+                                            void *, unsigned long);
+
+static Tcl_Obj *
+PdfiumStructString(FPDF_STRUCTELEMENT el, PdfiumStructGetter getter)
+{
+    unsigned long len = getter(el, NULL, 0);
+    if (len < 2) {
+        return NULL;
+    }
+    unsigned short *buf = (unsigned short *)ckalloc(len + 2);
+    getter(el, buf, len);
+    Tcl_Obj *obj = PdfiumUtf16ToObj(buf, len);
+    ckfree((char *)buf);
+    return obj;
+}
+
+/* Attribute eines Elements als Dict. /Scope und /Headers stehen hier --
+ * genau das, was pdf4tcllib bei Tabellen setzt und was ohne diese
+ * Schleife unsichtbar bliebe. */
+static Tcl_Obj *
+PdfiumStructAttrs(Tcl_Interp *interp, FPDF_STRUCTELEMENT el)
+{
+    int count = FPDF_StructElement_GetAttributeCount(el);
+    if (count <= 0) {
+        return NULL;
+    }
+    Tcl_Obj *dict = Tcl_NewDictObj();
+    for (int i = 0; i < count; i++) {
+        FPDF_STRUCTELEMENT_ATTR attr =
+                FPDF_StructElement_GetAttributeAtIndex(el, i);
+        if (!attr) continue;
+        int n = FPDF_StructElement_Attr_GetCount(attr);
+        for (int j = 0; j < n; j++) {
+            char name[128];
+            unsigned long namelen = 0;
+            if (!FPDF_StructElement_Attr_GetName(attr, j, name, sizeof(name),
+                                                 &namelen)) {
+                continue;
+            }
+            FPDF_STRUCTELEMENT_ATTR_VALUE val =
+                    FPDF_StructElement_Attr_GetValue(attr, name);
+            if (!val) continue;
+            Tcl_Obj *vobj = NULL;
+            switch (FPDF_StructElement_Attr_GetType(val)) {
+            case FPDF_OBJECT_STRING:
+            case FPDF_OBJECT_NAME: {
+                unsigned long slen = 0;
+                FPDF_StructElement_Attr_GetStringValue(val, NULL, 0, &slen);
+                if (slen >= 2) {
+                    unsigned short *sbuf = (unsigned short *)ckalloc(slen + 2);
+                    FPDF_StructElement_Attr_GetStringValue(val, sbuf, slen,
+                                                           &slen);
+                    vobj = PdfiumUtf16ToObj(sbuf, slen);
+                    ckfree((char *)sbuf);
+                }
+                break;
+            }
+            case FPDF_OBJECT_NUMBER: {
+                float f = 0;
+                if (FPDF_StructElement_Attr_GetNumberValue(val, &f)) {
+                    vobj = Tcl_NewDoubleObj((double)f);
+                }
+                break;
+            }
+            case FPDF_OBJECT_BOOLEAN: {
+                FPDF_BOOL b = 0;
+                if (FPDF_StructElement_Attr_GetBooleanValue(val, &b)) {
+                    vobj = Tcl_NewBooleanObj(b ? 1 : 0);
+                }
+                break;
+            }
+            default:
+                break;
+            }
+            if (vobj) {
+                /* namelen zaehlt das abschliessende Nullbyte mit. Ohne
+                 * das -1 endete jeder Attributname auf \0, und ein
+                 * "dict get $attrs O" fand nichts -- gemessen an einer
+                 * Liste, deren Attribute als "ListNumbering\0" und
+                 * "O\0" herauskamen. */
+                int nlen = (int)namelen;
+                if (nlen > 0 && name[nlen - 1] == '\0') nlen--;
+                Tcl_DictObjPut(interp, dict,
+                               Tcl_NewStringObj(name, nlen), vobj);
+            }
+        }
+    }
+    return dict;
+}
+
+static Tcl_Obj *
+PdfiumStructElement(Tcl_Interp *interp, FPDF_STRUCTELEMENT el, int depth)
+{
+    /* Ein zyklischer oder absurd tiefer Baum soll den Interpreter nicht
+     * mitnehmen. 64 Ebenen sind mehr, als ein Dokument je braucht. */
+    if (el == NULL || depth > 64) {
+        return NULL;
+    }
+    Tcl_Obj *dict = Tcl_NewDictObj();
+    Tcl_Obj *o;
+
+    o = PdfiumStructString(el, FPDF_StructElement_GetType);
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("type", -1),
+                   o ? o : Tcl_NewStringObj("", -1));
+
+    if ((o = PdfiumStructString(el, FPDF_StructElement_GetTitle)) != NULL)
+        Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("title", -1), o);
+    if ((o = PdfiumStructString(el, FPDF_StructElement_GetAltText)) != NULL)
+        Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("alt", -1), o);
+    if ((o = PdfiumStructString(el, FPDF_StructElement_GetActualText)) != NULL)
+        Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("actual", -1), o);
+    if ((o = PdfiumStructString(el, FPDF_StructElement_GetLang)) != NULL)
+        Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("lang", -1), o);
+    if ((o = PdfiumStructString(el, FPDF_StructElement_GetID)) != NULL)
+        Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("id", -1), o);
+
+    /* ALLE MCIDs, nicht nur die erste. */
+    Tcl_Obj *mcids = Tcl_NewListObj(0, NULL);
+    int mccount = FPDF_StructElement_GetMarkedContentIdCount(el);
+    for (int i = 0; i < mccount; i++) {
+        int mcid = FPDF_StructElement_GetMarkedContentIdAtIndex(el, i);
+        if (mcid >= 0) {
+            Tcl_ListObjAppendElement(interp, mcids, Tcl_NewIntObj(mcid));
+        }
+    }
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("mcids", -1), mcids);
+
+    Tcl_Obj *attrs = PdfiumStructAttrs(interp, el);
+    if (attrs) {
+        Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("attrs", -1), attrs);
+    }
+
+    Tcl_Obj *kids = Tcl_NewListObj(0, NULL);
+    int n = FPDF_StructElement_CountChildren(el);
+    for (int i = 0; i < n; i++) {
+        FPDF_STRUCTELEMENT kid = FPDF_StructElement_GetChildAtIndex(el, i);
+        Tcl_Obj *kobj = PdfiumStructElement(interp, kid, depth + 1);
+        if (kobj) {
+            Tcl_ListObjAppendElement(interp, kids, kobj);
+        }
+    }
+    Tcl_DictObjPut(interp, dict, Tcl_NewStringObj("children", -1), kids);
+    return dict;
+}
+
+static int
+PdfiumStructureCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+        return TCL_ERROR;
+    }
+
+    Tcl_WideInt ptr;
+    int pagenum;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE page = FPDF_LoadPage(doc, pagenum);
+    if (!page) {
+        Tcl_SetObjResult(interp,
+                Tcl_NewStringObj("cannot load page", -1));
+        return TCL_ERROR;
+    }
+
+    FPDF_STRUCTTREE tree = FPDF_StructTree_GetForPage(page);
+    if (!tree) {
+        /* Kein Strukturbaum ist kein Fehler -- die allermeisten PDFs
+         * haben keinen. Leere Liste, und der Aufrufer entscheidet. */
+        FPDF_ClosePage(page);
+        Tcl_SetObjResult(interp, Tcl_NewListObj(0, NULL));
+        return TCL_OK;
+    }
+
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+    int n = FPDF_StructTree_CountChildren(tree);
+    for (int i = 0; i < n; i++) {
+        FPDF_STRUCTELEMENT el = FPDF_StructTree_GetChildAtIndex(tree, i);
+        Tcl_Obj *o = PdfiumStructElement(interp, el, 0);
+        if (o) {
+            Tcl_ListObjAppendElement(interp, result, o);
+        }
+    }
+
+    FPDF_StructTree_Close(tree);
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
 }
 
 static int
@@ -2284,6 +2670,8 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumSearchCmd,     NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::links",
                          PdfiumLinksCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::structure",
+                         PdfiumStructureCmd,  NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::bookmarks",
                          PdfiumBookmarksCmd,  NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::formfields",
@@ -2314,6 +2702,8 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumDeletePageCmd,      NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::setrotation",
                          PdfiumSetRotationCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::mctext",
+                         PdfiumMcTextCmd,     NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::save",
                          PdfiumSaveCmd,            NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::savewithversion",
@@ -2335,6 +2725,6 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumPrintCmd,           NULL, NULL);
 #endif
 
-    Tcl_PkgProvide(interp, "pdfiumtcl", "0.6.0");
+    Tcl_PkgProvide(interp, PACKAGE_NAME, PACKAGE_VERSION);
     return TCL_OK;
 }

@@ -1,6 +1,6 @@
 # pdfiumtcl API Reference
 
-Version: 0.6.0
+Version: 0.6.1
 
 ---
 
@@ -252,6 +252,93 @@ foreach a [pdfium::annot_list $doc 0] {
 
 ---
 
+### pdfium::structure
+
+```tcl
+pdfium::structure doc-handle pagenum
+```
+
+Returns the tagged-PDF structure tree of the page, as PDFium sees it.
+Empty list if the page has no structure tree — which is the normal case:
+most PDFs are not tagged.
+
+Each element is a dict:
+
+| key | |
+|---|---|
+| `type` | the `/S` role: `P`, `H1`, `Table`, `TH`, `Figure`, ... |
+| `title` | `/T`, only present when set |
+| `alt` | `/Alt`, the alternative text |
+| `actual` | `/ActualText` |
+| `lang` | `/Lang` |
+| `id` | `/ID` |
+| `mcids` | **list** of all marked-content ids of the element |
+| `attrs` | dict of attributes (`/Scope`, `/O`, `/ListNumbering`, ...), only present when the element has any |
+| `children` | list of child elements, same shape |
+
+`mcids` is a list on purpose. A paragraph that runs across a page break has
+two marked-content ids, and PDFium's single-value
+`FPDF_StructElement_GetMarkedContentID` returns only one — the rest would
+disappear without a word.
+
+```tcl
+proc dumpStructure {nodes {indent ""}} {
+    foreach node $nodes {
+        set line "$indent[dict get $node type]"
+        if {[dict exists $node alt]} {
+            append line " alt='[dict get $node alt]'"
+        }
+        if {[llength [dict get $node mcids]]} {
+            append line "  mcids: [dict get $node mcids]"
+        }
+        if {[dict exists $node attrs]} {
+            append line "  attrs: [dict get $node attrs]"
+        }
+        puts $line
+        dumpStructure [dict get $node children] "$indent    "
+    }
+}
+
+dumpStructure [pdfium::structure $doc 0]
+```
+
+On a tagged document this prints something like:
+
+```
+Document
+    H1  mcids: 0
+    P  mcids: 1
+    P  mcids: 2
+        Link alt='pdf4tcl auf GitHub'
+            Span  mcids: 3
+    H2  mcids: 4
+    L  attrs: ListNumbering Decimal O List
+        LI
+            Lbl  mcids: 5
+            LBody  mcids: 6
+    ...
+    Table
+        TR
+            TH  mcids: 12  attrs: O Table Scope Column
+```
+
+(Copied from an actual run over a pdf4tcl demo, abridged in the middle.)
+
+`examples/structure-dump.tcl` does exactly this and takes a file name.
+
+**Why this exists.** Anyone who writes a structure tree and reads it back
+with their own tool confirms themselves by construction. PDFium is the
+engine inside Chrome and Edge, so this is a second, independent reading —
+and what does not show up here does not reach a reader there either.
+
+> **A measured limit.** PDFium does not appear to follow `/MCR` entries
+> that carry `/Stm`, so structure elements whose content lives in a form
+> XObject do not show up. A document that veraPDF accepts as PDF/UA can
+> therefore come out of this command with elements missing. That is worth
+> knowing before you read a short tree as "the document is badly tagged".
+
+---
+
 ## Writing / Editing (0.4)
 
 Since 0.4 pdfiumtcl can also create and modify PDFs.
@@ -268,6 +355,69 @@ A document/page/object handle is a wide integer, exactly like the
 `doc-handle` returned by `pdfium::open`. Pages created with `newpage` must
 be closed with `closepage`; documents with `close`.
 
+### pdfium::mctext
+
+```
+pdfium::mctext doc-handle pagenum
+```
+
+The text of a page grouped by marked-content ID, as a flat dict:
+
+```
+mcid1 text1 mcid2 text2 ...
+```
+
+The entries come in the order the objects sit in the **content stream**,
+which is the point: `pdfium::structure` gives the order of the
+**structure tree**, and comparing the two is the only way to see whether
+a document reads the way it is tagged.
+
+Text objects without a marked-content ID land under the key `-1`. In a
+tagged document that key should not appear -- it is content a screen
+reader cannot reach.
+
+```tcl
+set d [pdfium::open tagged.pdf]
+
+# MCIDs in the order of the structure tree
+proc walkMc {el varName} {
+    upvar 1 $varName out
+    foreach m [dict get $el mcids] { lappend out $m }
+    foreach k [dict get $el children] { walkMc $k out }
+}
+set tree {}
+foreach el [pdfium::structure $d 0] { walkMc $el tree }
+
+# MCIDs in the order of the content stream
+set stream {}
+foreach {id txt} [pdfium::mctext $d 0] {
+    if {$id >= 0} { lappend stream $id }
+}
+
+# An element may own an MCID without carrying text of its own -- a Table
+# does. Compare only those that do.
+set treeWithText {}
+foreach m $tree { if {$m in $stream} { lappend treeWithText $m } }
+
+puts [expr {$treeWithText eq $stream ? "reading order ok" : "MISMATCH"}]
+pdfium::close $d
+```
+
+Measured output on a tagged table:
+
+```
+  MCID 0: Bestellpositionen
+  MCID 2: Artikel
+  MCID 3: Menge
+  MCID 4: Einzelpreis
+  MCID 5: Betrag
+  MCID 7: Schraube M6
+```
+
+No validator checks the reading order. veraPDF answers whether a
+document is conformant, and a conformant file can still be tagged in one
+order and drawn in another -- which is exactly what a screen reader
+stumbles over.
 ### pdfium::newdoc
 
 ```tcl
