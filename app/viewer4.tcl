@@ -16,6 +16,12 @@ set state(doc)      ""
 set state(page)     0
 set state(total)    0
 set state(dpi)      150
+set state(suchtext) ""
+# "So wird gedruckt": rendert mit FPDF_PRINTING, also OHNE Ebenen, die
+# /Usage /Print /PrintState /OFF tragen. Das ist die einzige ehrliche
+# Vorschau auf ein Wasserzeichen oder einen Vordruck, der nur auf dem
+# Schirm stehen soll -- alles andere waere geraten.
+set state(druckansicht) 0
 set state(file)     ""
 set state(panel)    1    ;# Infopanel sichtbar
 
@@ -37,13 +43,23 @@ spinbox .tb.dpi  -from 72 -to 600 -increment 50 \
                  -command cmd_refresh
 button .tb.panel -text "Info ▶◀"  -command cmd_toggle_panel
 button .tb.text  -text "Text"     -command cmd_showtext
+label  .tb.such_l -text "Suchen:"
+entry  .tb.such   -textvariable state(suchtext) -width 14
+button .tb.suchall -text "alle Seiten" -command cmd_suchen_alle
+checkbutton .tb.druck -text "Druckansicht" \
+    -variable state(druckansicht) -command show_page
+button .tb.fest  -text "Festschreiben" -command cmd_flatten
 button .tb.print -text "Drucken"  -command cmd_print
 button .tb.ql    -text "QL"       -command cmd_print_ql
 
 pack .tb.open .tb.prev .tb.next .tb.info \
      .tb.dpi_l .tb.dpi .tb.panel \
-     .tb.text .tb.print .tb.ql \
+     .tb.text .tb.such_l .tb.such .tb.suchall .tb.druck \
+     .tb.fest .tb.print .tb.ql \
      -side left -padx 3 -pady 3
+
+# Eingabe abschicken heisst suchen; leeres Feld heisst: Markierung weg.
+bind .tb.such <Return> cmd_suchen
 
 # Hauptbereich: PanedWindow
 panedwindow .pw -orient horizontal -sashwidth 4 -sashrelief raised
@@ -69,10 +85,14 @@ ttk::notebook .pw.right.nb
 frame .pw.right.nb.bm   ;# Lesezeichen
 frame .pw.right.nb.meta ;# Metadaten
 frame .pw.right.nb.form ;# Formularfelder
+frame .pw.right.nb.such ;# Suchtreffer im ganzen Dokument
+frame .pw.right.nb.bau  ;# Woraus die Seite gezeichnet ist
 
 .pw.right.nb add .pw.right.nb.bm   -text "Lesezeichen"
 .pw.right.nb add .pw.right.nb.meta -text "Metadaten"
 .pw.right.nb add .pw.right.nb.form -text "Formular"
+.pw.right.nb add .pw.right.nb.such -text "Treffer"
+.pw.right.nb add .pw.right.nb.bau  -text "Aufbau"
 
 pack .pw.right.nb -fill both -expand 1
 
@@ -118,6 +138,72 @@ ttk::treeview .pw.right.nb.meta.tv \
 
 pack .pw.right.nb.meta.sb -side right -fill y
 pack .pw.right.nb.meta.tv -side left  -fill both -expand 1
+
+# Tab: Aufbau
+#
+# gettext sagt, WAS auf der Seite steht, die Lesezeichen sagen, wie sie
+# gegliedert ist. Woraus sie GEZEICHNET ist, sagte nichts: ob ein Kasten
+# ein Pfad oder ein Bild ist, ob hinter dem Text ein Scan liegt, wo ein
+# Form-XObject sitzt. Beim Nachbauen fremder Vordrucke ist das die
+# Frage, die man zuerst hat.
+scrollbar .pw.right.nb.bau.sb -orient vertical \
+    -command {.pw.right.nb.bau.tv yview}
+ttk::treeview .pw.right.nb.bau.tv \
+    -yscrollcommand {.pw.right.nb.bau.sb set} \
+    -columns {nr art groesse box} \
+    -displaycolumns {nr art groesse} \
+    -show headings \
+    -selectmode browse
+.pw.right.nb.bau.tv heading nr      -text "#"
+.pw.right.nb.bau.tv heading art     -text "Art"
+.pw.right.nb.bau.tv heading groesse -text "Groesse (pt)"
+.pw.right.nb.bau.tv column  nr      -width 35  -stretch 0 -anchor e
+.pw.right.nb.bau.tv column  art     -width 60  -stretch 0
+.pw.right.nb.bau.tv column  groesse -width 110 -stretch 1 -anchor e
+
+bind .pw.right.nb.bau.tv <<TreeviewSelect>> {
+    set sel [.pw.right.nb.bau.tv selection]
+    .pw.left.c delete objmark
+    if {$sel ne ""} {
+        set box [.pw.right.nb.bau.tv set $sel box]
+        if {[llength $box] == 4} { markiere_box $box objmark "#0060c0" }
+    }
+}
+pack .pw.right.nb.bau.sb -side right -fill y
+pack .pw.right.nb.bau.tv -side left  -fill both -expand 1
+
+# Tab: Suchtreffer
+#
+# Die Suche im Werkzeugbalken sah nur die AKTUELLE Seite. Wer wissen
+# will, ob ein Wort im Dokument vorkommt, blaettert dann von Hand --
+# und uebersieht die Seite, auf der es steht.
+scrollbar .pw.right.nb.such.sb -orient vertical \
+    -command {.pw.right.nb.such.tv yview}
+ttk::treeview .pw.right.nb.such.tv \
+    -yscrollcommand {.pw.right.nb.such.sb set} \
+    -columns {seite text seiteIdx} \
+    -displaycolumns {seite text} \
+    -show headings \
+    -selectmode browse
+.pw.right.nb.such.tv heading seite -text "Seite"
+.pw.right.nb.such.tv heading text  -text "Umgebung"
+.pw.right.nb.such.tv column  seite -width 45  -stretch 0 -anchor e
+.pw.right.nb.such.tv column  text  -width 200 -stretch 1
+
+bind .pw.right.nb.such.tv <<TreeviewSelect>> {
+    set sel [.pw.right.nb.such.tv selection]
+    if {$sel ne ""} {
+        set pg [.pw.right.nb.such.tv set $sel seiteIdx]
+        if {$pg ne "" && $pg != $state(page)} {
+            set state(page) $pg
+            show_page
+        } else {
+            cmd_suchen
+        }
+    }
+}
+pack .pw.right.nb.such.sb -side right -fill y
+pack .pw.right.nb.such.tv -side left  -fill both -expand 1
 
 # Tab: Formularfelder
 scrollbar .pw.right.nb.form.sb -orient vertical \
@@ -311,6 +397,193 @@ proc update_info_panel {} {
     }
 }
 
+# ------------------------------------------------------------------ #
+# Suchen mit Markierung                                               #
+#                                                                     #
+# Moeglich seit "search -rects 1": vorher sagte ein Treffer, DASS das  #
+# Wort auf der Seite steht, nicht WO. Damit liess sich nichts          #
+# anzeigen.                                                           #
+#                                                                     #
+# Die Rechnung ist die eine Stelle, an der man sich vertut: pdfium     #
+# gibt Punkte in Seitenkoordinaten mit Ursprung UNTEN LINKS, der       #
+# Canvas zaehlt Pixel von OBEN LINKS. Also skalieren UND spiegeln.     #
+# ------------------------------------------------------------------ #
+# ------------------------------------------------------------------ #
+# Suche ueber ALLE Seiten                                             #
+#                                                                     #
+# Die Suche im Werkzeugbalken sieht nur die aktuelle Seite. Wer wissen #
+# will, ob ein Wort im Dokument vorkommt, blaettert sonst von Hand --  #
+# und uebersieht die Seite, auf der es steht.                         #
+# ------------------------------------------------------------------ #
+# ------------------------------------------------------------------ #
+# Felder und Anmerkungen festschreiben                                #
+#                                                                     #
+# Schreibt eine NEUE Datei; das Original bleibt, wie es ist. Danach    #
+# sind Felder und Anmerkungen Zeichnung: nicht mehr anklickbar, aber   #
+# auch nicht mehr davon abhaengig, ob ein Betrachter sie darstellt.    #
+#                                                                     #
+# "-forms 1" ist dabei nicht wahlweise: ohne das brennt flatten einen  #
+# LEEREN Appearance-Strom ein, wenn die Datei mit fillForms gefuellt   #
+# wurde -- und der Wert ist danach ganz weg. Gemessen 05.09.2026.      #
+# ------------------------------------------------------------------ #
+# ------------------------------------------------------------------ #
+# Ein Rechteck aus PDF-Punkten auf dem Canvas markieren                #
+#                                                                     #
+# EINE Stelle fuer die Umrechnung, nicht zwei: pdfium gibt Punkte mit  #
+# Ursprung unten links, der Canvas zaehlt Pixel von oben links -- also #
+# skalieren UND spiegeln. Der Massstab kommt aus dem BILD, nicht aus   #
+# der DPI-Einstellung: beim Rendern wird gerundet, und ein halbes      #
+# Pixel verschiebt jede Markierung.                                    #
+#                                                                     #
+# Suche und Aufbau benutzen dieselbe Prozedur. Zwei Rechnungen fuer    #
+# dieselbe Sache waeren zwei Gelegenheiten, sich zu vertun -- und eine #
+# davon faellt spaeter auf als die andere.                             #
+# ------------------------------------------------------------------ #
+proc markiere_box {box tag farbe {fuellung ""}} {
+    global state
+    lassign $box links unten rechts oben
+    lassign [pdfium::pagesize $state(doc) $state(page)] wmm hmm
+    set wpt [expr {$wmm * 72.0 / 25.4}]
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    if {$wpt <= 0 || $hpt <= 0} return
+    set sx [expr {[image width  pdfpage] / $wpt}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    set args [list -outline $farbe -width 1 -tags $tag]
+    if {$fuellung ne ""} { lappend args -fill $fuellung -stipple gray25 }
+    .pw.left.c create rectangle \
+        [expr {$links  * $sx}] [expr {($hpt - $oben)  * $sy}] \
+        [expr {$rechts * $sx}] [expr {($hpt - $unten) * $sy}] \
+        {*}$args
+}
+
+# Den Aufbau der aktuellen Seite auflisten.
+proc update_aufbau {} {
+    global state
+    set tv .pw.right.nb.bau.tv
+    $tv delete [$tv children {}]
+    .pw.left.c delete objmark
+    if {$state(doc) eq ""} return
+    if {[catch {pdfium::pageobjects $state(doc) $state(page)} objekte]} return
+    foreach e $objekte {
+        lassign $e nr art box
+        set groesse ""
+        if {[llength $box] == 4} {
+            lassign $box l u r o
+            set groesse [format "%.0f x %.0f" [expr {$r-$l}] [expr {$o-$u}]]
+        }
+        $tv insert {} end -values [list $nr $art $groesse $box]
+    }
+}
+
+proc cmd_flatten {} {
+    global state
+    if {$state(doc) eq ""} return
+    set aus [tk_getSaveFile -title "Festgeschrieben speichern unter" \
+            -defaultextension .pdf \
+            -initialfile [file rootname [file tail $state(file)]]-fest.pdf \
+            -filetypes {{PDF {.pdf}} {Alle *}}]
+    if {$aus eq ""} return
+    if {[file normalize $aus] eq [file normalize $state(file)]} {
+        tk_messageBox -icon error -message \
+            "Bitte einen anderen Namen: das Original soll bleiben."
+        return
+    }
+    set n 0 ; set nichts 0
+    if {[catch {
+        for {set p 0} {$p < $state(total)} {incr p} {
+            set state(pageinfo) "Schreibe Seite [expr {$p+1}] / $state(total) ..."
+            update idletasks
+            if {[pdfium::flatten $state(doc) $p -forms 1] eq "nothing"} {
+                incr nichts
+            } else {
+                incr n
+            }
+        }
+        pdfium::save $state(doc) $aus
+    } err]} {
+        tk_messageBox -icon error -message "Festschreiben: $err"
+        set state(pageinfo) "Seite [expr {$state(page)+1}] / $state(total)"
+        return
+    }
+    # Das GEOEFFNETE Dokument ist jetzt im Speicher veraendert. Wer
+    # weiterblaettert, saehe die eingebrannte Fassung, ohne es zu
+    # wissen -- also neu laden, damit Anzeige und Datei zusammenpassen.
+    set datei $state(file)
+    open_pdf $datei
+    set state(pageinfo) "$n Seite(n) festgeschrieben, $nichts ohne Inhalt"
+    tk_messageBox -icon info -message \
+        "Geschrieben: $aus\n\n$n Seite(n) festgeschrieben, $nichts hatten nichts einzubrennen.\n\nDas Original ist unveraendert."
+}
+
+proc cmd_suchen_alle {} {
+    global state
+    set tv .pw.right.nb.such.tv
+    $tv delete [$tv children {}]
+    if {$state(doc) eq "" || [string trim $state(suchtext)] eq ""} {
+        set state(pageinfo) "Nichts zu suchen"
+        return
+    }
+    .pw.right.nb select .pw.right.nb.such
+    set gesamt 0
+    for {set p 0} {$p < $state(total)} {incr p} {
+        # Bei vielen Seiten dauert das; die Statuszeile sagt, wo es
+        # steht. Ohne das haelt man den Viewer fuer haengengeblieben.
+        set state(pageinfo) "Suche Seite [expr {$p+1}] / $state(total) ..."
+        update idletasks
+        if {[catch {pdfium::search $state(doc) $p $state(suchtext)} treffer]} {
+            continue
+        }
+        if {![llength $treffer]} continue
+        # Fuer die Umgebung den Seitentext EINMAL holen, nicht je
+        # Treffer -- sonst liest man dieselbe Seite zehnmal.
+        set text [pdfium::gettext $state(doc) $p]
+        foreach t $treffer {
+            lassign $t pos cnt
+            set von [expr {$pos - 20}]
+            if {$von < 0} { set von 0 }
+            set bis [expr {$pos + $cnt + 20}]
+            set um [string range $text $von $bis]
+            # Zeilenumbrueche wuerden die Tabellenzeile zerreissen.
+            set um [string map [list \n " " \r ""] $um]
+            $tv insert {} end -values [list [expr {$p+1}] [string trim $um] $p]
+            incr gesamt
+        }
+    }
+    if {$gesamt == 0} {
+        set state(pageinfo) "\"$state(suchtext)\": nichts gefunden"
+        bell
+    } else {
+        set state(pageinfo) "$gesamt Treffer auf allen Seiten"
+    }
+}
+
+proc cmd_suchen {} {
+    global state
+    .pw.left.c delete treffer
+    if {$state(doc) eq "" || [string trim $state(suchtext)] eq ""} {
+        set state(pageinfo) "Seite [expr {$state(page)+1}] / $state(total)"
+        return
+    }
+    if {[catch {
+        pdfium::search $state(doc) $state(page) $state(suchtext) -rects 1
+    } treffer]} {
+        tk_messageBox -icon error -message "Suche: $treffer"
+        return
+    }
+    # Die Umrechnung steht in markiere_box -- eine Stelle, nicht zwei.
+    set n 0
+    foreach t $treffer {
+        lassign $t pos cnt rects
+        foreach r $rects {
+            lassign $r links unten rechts oben
+            markiere_box $r treffer "#c00000" "#ffff00"
+            incr n
+        }
+    }
+    set state(pageinfo) "[llength $treffer] Treffer"
+    if {$n == 0} { bell }
+}
+
 proc show_page {} {
     global state
     if {$state(doc) eq ""} return
@@ -320,9 +593,16 @@ proc show_page {} {
     set state(pageinfo) "Seite [expr {$p+1}] / $n"
 
     # Rendern: Bild heißt immer "pdfpage"
+    #
+    # "-forms 1", damit AUSGEFUELLTE FELDER zu sehen sind. Ohne das
+    # fehlten sie im Bild, waehrend die Feldliste rechts sie auffuehrte:
+    # gemessen an tests/fixtures/form.pdf -- "Muster GmbH" stand in der
+    # Liste und nicht auf der Seite. pdfium zeichnet Widget-Annotationen
+    # nicht mit dem Seiteninhalt, sondern ueber die Formularschicht.
     if {[catch {
         pdfium::render $state(doc) $p \
-            -dpi $state(dpi) -imagename pdfpage
+            -dpi $state(dpi) -forms 1 \
+            -printing $state(druckansicht) -imagename pdfpage
     } err]} {
         tk_messageBox -icon error -message "Render-Fehler: $err"
         return
@@ -338,6 +618,13 @@ proc show_page {} {
     .pw.left.c configure -scrollregion [list 0 0 $iw $ih]
     .pw.left.c yview moveto 0
     .pw.left.c xview moveto 0
+
+    # Die Markierung gehoert zum Bild, nicht zur Suche: nach Zoom oder
+    # Seitenwechsel muss sie neu gerechnet werden, sonst steht sie am
+    # alten Ort und behauptet etwas Falsches. Loeschen allein waere
+    # ehrlicher als stehenlassen, aber unbequem.
+    if {[string trim $state(suchtext)] ne ""} { cmd_suchen }
+    update_aufbau
 }
 
 proc cmd_prev {} {
@@ -587,8 +874,9 @@ proc do_print {printer range dpi copies} {
 
         # Seite mit Druckauflösung rendern
         if {[catch {
+            # Auch hier -forms: was man sieht, soll man drucken.
             pdfium::render $state(doc) $p \
-                -dpi $dpi -imagename printpage
+                -dpi $dpi -forms 1 -imagename printpage
             printpage write $tmpfile -format png
         } err]} {
             tk_messageBox -icon error \
@@ -971,7 +1259,7 @@ proc do_print_ql {printer band dpi range cut {fit 0}} {
 
         if {[catch {
             pdfium::render $state(doc) $p \
-                -width $w_px -imagename qlpage
+                -width $w_px -forms 1 -imagename qlpage
             qlpage write $tmpfile -format png
         } err]} {
             tk_messageBox -icon error \

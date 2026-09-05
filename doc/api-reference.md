@@ -1,6 +1,6 @@
 # pdfiumtcl API Reference
 
-Version: 0.6.1
+Version: 0.6.2
 
 ---
 
@@ -95,7 +95,42 @@ Renders a page as a Tk photo image. Returns the image name.
 Options:
 
 | Option | Description |
-|--------|-------------|
+|
+
+**`-clip {left bottom right top}`** renders only that part of the page,
+in **points, page coordinates, origin bottom left** -- the same numbers
+`search -rects 1` returns and `pageobjects` reports. A rectangle reaching
+past the sheet is cut to it; one entirely outside is an error.
+
+Without this every zoom has to build the whole page. On an A0 drawing
+that is the difference between usable and not.
+
+**`-forms 1`** draws form fields as well. Without it they are **missing
+from the image**: PDFium does not draw widget annotations with the page
+contents but through the form layer (`FPDF_FFLDraw`). Measured on
+`tests/fixtures/form.pdf` -- `formfields` reported `Muster GmbH` while the
+image showed only the label.
+
+For drawing, an empty `FPDF_FORMFILLINFO` with version 1 is enough: the
+callbacks in it are for input, and there is none here. *Filling* a form is
+a different matter and needs the whole environment.
+
+`-forms` and `-clip` cannot be combined: `FPDF_FFLDraw` takes no matrix.
+Saying so is better than silently drawing the wrong thing.
+
+**`-printing 1`** renders the way a printer would (`FPDF_PRINTING`).
+This makes `/Usage /Print /PrintState /OFF` **measurable** instead of
+believed: render once with and once without, and compare.
+
+```tcl
+pdfium::render $doc 3 -dpi 100 -imagename schirm
+pdfium::render $doc 3 -dpi 100 -printing 1 -imagename druck
+# measured on pdf4tcl's demo-layers.pdf, page 4:
+#   screen 58656 dark pixels, printing 52782 -- the difference is
+#   exactly the layer marked -print 0, and nothing else.
+```
+
+--------|-------------|
 | `-dpi n` | Render at n DPI (default: 72) |
 | `-width px` | Render at exactly px pixels wide (height proportional) |
 | `-imagename name` | Use this Tk photo image name |
@@ -129,10 +164,42 @@ puts $text
 
 ---
 
+### pdfium::pageobjects
+
+```tcl
+pdfium::pageobjects doc-handle pagenum
+```
+
+What the page is **made of**. Returns one entry per object:
+
+```
+{index type {left bottom right top}}
+```
+
+`type` is `text`, `path`, `image`, `shading`, `form` or `unknown`; the
+rectangle is in points, page coordinates, origin bottom left. An object
+without bounds gets an empty list -- a list of zeros would claim it sits
+in the corner.
+
+`gettext` says **what** is on the page and `structure` says how it is
+tagged. What it is **drawn from** was not available: whether a box is a
+path or an image, whether a scan lies behind the text, where a form
+XObject sits.
+
+```tcl
+set arten [dict create]
+foreach e [pdfium::pageobjects $doc 0] {
+    dict incr arten [lindex $e 1]
+}
+puts $arten        ;# e.g. "path 8 text 28"
+```
+
+---
+
 ### pdfium::search
 
 ```tcl
-pdfium::search doc-handle pagenum searchtext ?-case 0|1?
+pdfium::search doc-handle pagenum searchtext ?-case 0|1? ?-rects 0|1?
 ```
 
 Searches for text on a page. Returns a list of `{startpos count}` pairs
@@ -147,6 +214,35 @@ foreach hit $hits {
     puts "Found at position $pos, length $count"
 }
 ```
+
+**`-rects 1` adds the rectangles.** Each hit becomes
+`{startpos count {rect ...}}`, and every rect is
+`{left bottom right top}` in **points, page coordinates, origin bottom
+left** -- the numbers a stamp or a strike-through line is drawn with.
+
+```tcl
+foreach hit [pdfium::search $doc 0 "storniert" -rects 1] {
+    lassign $hit pos count rects
+    foreach r $rects {
+        lassign $r left bottom right top
+        # ein Strich durch das Wort, auf halber Hoehe
+        set y [expr {($bottom + $top) / 2.0}]
+        puts "line $left $y $right $y"
+    }
+}
+```
+
+**Why several rectangles per hit:** a match can run across a line break
+or sit in more than one text run. PDFium then returns one rectangle per
+contiguous piece. Returning only the first would draw the line-break case
+silently wrong.
+
+Without this the character position said *that* something is there, not
+*where* -- crossing a word out was not possible.
+
+The rectangles ignore `/Rotate`: they are page coordinates as the content
+stream uses them. On a rotated page the drawing has to be rotated with
+it.
 
 ---
 
@@ -355,6 +451,92 @@ A document/page/object handle is a wide integer, exactly like the
 `doc-handle` returned by `pdfium::open`. Pages created with `newpage` must
 be closed with `closepage`; documents with `close`.
 
+### pdfium::flatten
+
+```tcl
+pdfium::flatten doc-handle pagenum ?-mode display|print?
+```
+
+Burns annotations and form fields **into the page contents**.
+
+Afterwards they are drawing: no longer clickable, no longer removable --
+but also no longer dependent on whether a viewer renders them. That is
+what "if you need the annotations burned in" means: a comment or a filled
+field that looks the same everywhere.
+
+This is the opposite of overlaying: there the original stays untouched,
+here it is changed. Wanting both means overlay first, then flatten.
+
+Returns `flattened` or `nothing` (nothing to burn in -- not an error;
+otherwise every batch would stop at the first empty page). A real failure
+raises an error, and PDFium gives **no reason** for it; that is stated in
+`fpdf_flatten.h` and cannot be improved here.
+
+**`-forms 1` first builds the form layer.** Use it whenever the file was
+filled by something that sets `/V` and `/NeedAppearances` without
+rebuilding the appearance stream -- `pdf4tcl::fillForms` does exactly
+that. Without it `flatten` burns in the **empty** stream and the value is
+gone afterwards, which is worse than before:
+
+```
+flatten            -> "Auftrag | Kunde:"
+flatten -forms 1   -> "Auftrag | Kunde: | Spedition Muster"
+```
+
+The form environment generates the missing streams, and only then does
+`flatten` have something to take over.
+
+`-mode print` uses `FLAT_PRINT` instead of `FLAT_NORMALDISPLAY`. The
+difference matters for annotations meant only for the screen or only for
+paper -- the same distinction `/Usage` makes for layers.
+
+**The page is changed in memory only.** Call `pdfium::save` to keep it,
+or the work is gone when the document closes.
+
+```tcl
+set d [pdfium::open formular.pdf]
+pdfium::flatten $d 0        ;# -> flattened
+pdfium::save $d flach.pdf
+pdfium::close $d
+```
+
+---
+
+### pdfium::charboxes
+
+```tcl
+pdfium::charboxes doc-handle pagenum ?-range {start count}?
+```
+
+One rectangle **per character**: `{char {left bottom right top}}`, points,
+page coordinates, origin bottom left.
+
+`gettext` gives the text, `search -rects` the rectangles of whole hits,
+`pageobjects` those of an object. The finest step was missing: where does
+*this one character* sit. That is what highlighting inside a word,
+following a line break, or re-setting text needs.
+
+Without `-range` the whole page, which can be thousands of entries.
+`-range {start count}` takes exactly the two numbers `search` returns
+without `-rects`, so the two commands fit together:
+
+```tcl
+lassign [lindex [pdfium::search $doc 0 "Etikett"] 0] pos cnt
+set teil [pdfium::charboxes $doc 0 -range [list $pos $cnt]]
+join [lmap e $teil {lindex $e 0}] ""     ;# -> Etikett
+```
+
+A range past the end of the page yields an empty list, not an error: a
+hit at the page end must not fail because someone counted one too far.
+
+**A trap in the C layer, in case anyone extends this:** `FPDFText_GetCharBox`
+hands out *left, right, bottom, top* -- a different order from
+`FPDFText_GetRect`, which uses *left, top, right, bottom*. Treating them
+alike swaps edges. Everything leaves this package as
+`{left bottom right top}`.
+
+---
+
 ### pdfium::mctext
 
 ```
@@ -554,6 +736,19 @@ pdfium::savewithversion doc-handle filename version ?flags?
 
 Like `save`, but forces the PDF version with `FPDF_SaveWithVersion`.
 `version` is an integer such as `14`..`17` (PDF 1.4 .. 1.7). Returns `0|1`.
+
+
+**`-boxes 1`** adds the rectangle of each text object and returns a
+**different shape**: a list of `{mcid text {left bottom right top}}`
+triples.
+
+Without the option the flat alternating list stays, which reads like a
+dict. Appending a third element there would silently turn it into
+something else -- `dict get` on an odd list is an error, and one that
+surfaces at the caller.
+
+The rectangle is that of the **text object**, not of a character; for
+characters there is `charboxes`.
 
 ---
 

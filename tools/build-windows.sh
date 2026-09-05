@@ -139,6 +139,30 @@ SUB="windows64"
 [ "$TCLGEN" = "9" ] && SUB="windows64-tcl9"
 
 mkdir -p "$DIST/$SUB"
+
+# Aeltere Fassungen wegraeumen, BEVOR die neue hineinkommt.
+#
+# pkgIndex.tcl entsteht aus pkgIndex.tcl.in und traegt die Nummer aus
+# configure.ac -- die stimmt also nach jedem Bau. Die DLL daneben nicht:
+# sie heisst nach ihrer Version, und die alte blieb einfach liegen.
+# Gemessen am 05.09.2026, vor dem Bau auf 0.6.2:
+#
+#   dist-win/windows64-tcl9/  tcl9pdfiumtcl060.dll  tcl9pdfiumtcl061.dll
+#   dist-win/windows64/       pdfiumtcl060.dll      pdfiumtcl061.dll
+#
+# Zwei Fassungen, von denen pkgIndex.tcl nur eine nennt. Die andere laedt
+# niemand, sie liegt im Repo und wird bei jedem Bau eine mehr.
+#
+# "pdfium.dll" ist NICHT gemeint und wird vom Muster auch nicht
+# getroffen -- die Fremdbibliothek heisst ohne "tcl".
+for alt in "$DIST/$SUB"/*pdfiumtcl*.dll ; do
+    [ -e "$alt" ] || continue
+    if [ "$(basename "$alt")" != "$DLL" ] ; then
+        echo "    entferne alte Fassung: $(basename "$alt")"
+        rm -f "$alt"
+    fi
+done
+
 cp "$DLL" "$DIST/$SUB/"
 cp "$VENDOR/bin/pdfium.dll" "$DIST/$SUB/"
 cp pkgIndex.tcl "$DIST/$SUB/"
@@ -150,4 +174,6 @@ echo "    $DIST/$SUB/pdfium.dll        (muss NEBEN der DLL liegen)"
 echo "    $DIST/$SUB/pkgIndex.tcl"
 echo
 echo "Auf Windows testen:"
-echo "    tclsh tools/test-windows.tcl dist-win/$SUB test.pdf"
+echo "    tclsh tools/test-windows.tcl"
+echo "    (Paketverzeichnis und Test-PDF findet es selbst;"
+echo "     eigene angeben geht weiterhin: ... dist-win/$SUB eigene.pdf)"

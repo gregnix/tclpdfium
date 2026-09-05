@@ -50,6 +50,8 @@
 #include <fpdf_ppo.h>
 #include <fpdf_transformpage.h>
 #include <fpdf_structtree.h>
+#include <fpdf_flatten.h>
+#include <fpdf_formfill.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -206,7 +208,8 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
     if (EnsureTk(interp) != TCL_OK) return TCL_ERROR;
     if (objc < 3) {
         Tcl_WrongNumArgs(interp, 1, objv,
-                         "doc-handle pagenum ?-dpi n? ?-width px? ?-imagename name?");
+                         "doc-handle pagenum ?-dpi n? ?-width px?"
+                         " ?-imagename name? ?-clip {l u r o}? ?-printing 0|1?");
         return TCL_ERROR;
     }
 
@@ -222,6 +225,10 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
     /* Optionale Argumente */
     int dpi       = 150;
     int target_w  = 0;   /* 0 = nicht gesetzt */
+    int haveClip  = 0;
+    double clipL = 0, clipU = 0, clipR = 0, clipO = 0;
+    int printing  = 0;
+    int withForms = 0;
     char imgname[64];
     snprintf(imgname, sizeof(imgname), "pdfimg%d", pagenum);
 
@@ -244,6 +251,54 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
                 return TCL_ERROR;
         } else if (strcmp(opt, "-imagename") == 0) {
             strncpy(imgname, Tcl_GetString(objv[i+1]), sizeof(imgname)-1);
+        } else if (strcmp(opt, "-clip") == 0) {
+            /* Nur den Ausschnitt {links unten rechts oben} rendern, in
+             * PUNKT und Seitenkoordinaten -- dieselben Zahlen, die
+             * "search -rects 1" liefert. Ohne das muss jeder Zoom die
+             * GANZE Seite bauen; bei einer A0-Zeichnung ist das der
+             * Unterschied zwischen fluessig und unbrauchbar. */
+            Tcl_Obj **rv; Tcl_Size rc;
+            if (Tcl_ListObjGetElements(interp, objv[i+1], &rc, &rv) != TCL_OK)
+                return TCL_ERROR;
+            if (rc != 4) {
+                Tcl_SetObjResult(interp, Tcl_NewStringObj(
+                    "-clip needs {left bottom right top} in points", -1));
+                return TCL_ERROR;
+            }
+            if (Tcl_GetDoubleFromObj(interp, rv[0], &clipL) != TCL_OK ||
+                Tcl_GetDoubleFromObj(interp, rv[1], &clipU) != TCL_OK ||
+                Tcl_GetDoubleFromObj(interp, rv[2], &clipR) != TCL_OK ||
+                Tcl_GetDoubleFromObj(interp, rv[3], &clipO) != TCL_OK)
+                return TCL_ERROR;
+            if (clipR <= clipL || clipO <= clipU) {
+                Tcl_SetObjResult(interp, Tcl_NewStringObj(
+                    "-clip: right must exceed left and top must exceed bottom",
+                    -1));
+                return TCL_ERROR;
+            }
+            haveClip = 1;
+        } else if (strcmp(opt, "-forms") == 0) {
+            /* Formularfelder MITZEICHNEN.
+             *
+             * Ohne das fehlen sie im Bild: pdfium zeichnet Widget-
+             * Annotationen nicht mit FPDF_RenderPageBitmap, sondern
+             * ueber die Formularschicht (FPDF_FFLDraw). Gemessen an
+             * tests/fixtures/form.pdf -- "formfields" meldete
+             * "Muster GmbH", im Bild stand nur "Name:".
+             *
+             * Fuers ZEICHNEN reicht eine leere FPDF_FORMFILLINFO mit
+             * version 1: die Rueckrufe darin sind fuer Eingaben da, und
+             * die gibt es hier nicht. Ausfuellen ist etwas anderes und
+             * braucht die ganze Umgebung. */
+            if (Tcl_GetIntFromObj(interp, objv[i+1], &withForms) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-printing") == 0) {
+            /* FPDF_PRINTING (0x800): rendern, wie ein Drucker es taete.
+             * Damit laesst sich MESSEN, ob eine Ebene mit
+             * /Usage /Print /PrintState /OFF beim Drucken wegbleibt --
+             * bisher konnte man das nur glauben. */
+            if (Tcl_GetIntFromObj(interp, objv[i+1], &printing) != TCL_OK)
+                return TCL_ERROR;
         } else {
             /* Say so instead of ignoring it. An unknown option used to
              * pass unnoticed: "render -scale 2.0" -- an option that only
@@ -251,19 +306,49 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
              * factor, and the caller had no way of telling why the zoom
              * did nothing. */
             Tcl_SetObjResult(interp,
-                Tcl_ObjPrintf("unknown option \"%s\": must be -dpi, -width"
-                              " or -imagename", opt));
+                Tcl_ObjPrintf("unknown option \"%s\": must be -dpi, -width,"
+                              " -imagename, -clip, -printing or -forms", opt));
             return TCL_ERROR;
         }
+    }
+
+    /* Unvertraegliche Optionen PRUEFEN, BEVOR etwas belegt ist.
+     *
+     * FPDF_FFLDraw kennt keine Matrix; fuer einen Ausschnitt MIT
+     * Formularfeldern gibt es ueber diese Schnittstelle keinen Weg.
+     * Lieber sagen als still das Falsche zeichnen.
+     *
+     * Der erste Versuch meldete das mitten im Renderteil und gab dabei
+     * Bitmap und Seite frei -- der normale Weg danach tat es noch
+     * einmal, und das Ergebnis war ein Speicherzugriffsfehler. Eine
+     * Pruefung, die aufraeumen muss, steht an der falschen Stelle. */
+    if (haveClip && withForms) {
+        PDFIUM_ERROR(interp,
+            "-forms and -clip cannot be combined (FPDF_FFLDraw takes no"
+            " matrix)");
     }
 
     FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
     FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
     if (!page) PDFIUM_ERROR(interp, "cannot load page");
 
-    /* Seitengröße in Punkten */
-    double w_pt = FPDF_GetPageWidth(page);
-    double h_pt = FPDF_GetPageHeight(page);
+    /* Seitengröße in Punkten -- oder die des Ausschnitts */
+    double page_w = FPDF_GetPageWidth(page);
+    double page_h = FPDF_GetPageHeight(page);
+    if (haveClip) {
+        /* Ausserhalb des Blattes abschneiden statt leere Flaeche zu
+         * rendern: ein Rechteck aus einer Suche kann am Rand liegen. */
+        if (clipL < 0) clipL = 0;
+        if (clipU < 0) clipU = 0;
+        if (clipR > page_w) clipR = page_w;
+        if (clipO > page_h) clipO = page_h;
+        if (clipR <= clipL || clipO <= clipU) {
+            FPDF_ClosePage(page);
+            PDFIUM_ERROR(interp, "-clip lies outside the page");
+        }
+    }
+    double w_pt = haveClip ? (clipR - clipL) : page_w;
+    double h_pt = haveClip ? (clipO - clipU) : page_h;
 
     int w_px, h_px;
     if (target_w > 0) {
@@ -287,8 +372,48 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
     FPDFBitmap_FillRect(bmp, 0, 0, w_px, h_px, 0xFFFFFFFF);
 
     /* Rendern */
-    FPDF_RenderPageBitmap(bmp, page, 0, 0, w_px, h_px,
-                          0 /*rotation*/, FPDF_ANNOT);
+    int flags = FPDF_ANNOT | (printing ? FPDF_PRINTING : 0);
+
+    /* Die Formularschicht, wenn verlangt. Sie wird NACH dem Seiteninhalt
+     * gezeichnet, also erst weiter unten -- hier nur aufgebaut, damit im
+     * Fehlerfall nichts halb fertig ist. */
+    FPDF_FORMHANDLE form = NULL;
+    if (withForms) {
+        FPDF_FORMFILLINFO ffi;
+        memset(&ffi, 0, sizeof(ffi));
+        ffi.version = 1;
+        form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
+        if (form) FORM_OnAfterLoadPage(page, form);
+    }
+    if (haveClip) {
+        /* Mit Matrix: verschieben, damit die linke untere Ecke des
+         * Ausschnitts auf den Ursprung faellt, und auf die Bildgroesse
+         * skalieren. PDFium rechnet in Geraetekoordinaten mit y NACH
+         * UNTEN, die Seite in y nach oben -- daher das Minus in f und
+         * der Bezug auf die OBERE Kante des Ausschnitts.
+         */
+        double sx = (double)w_px / w_pt;
+        double sy = (double)h_px / h_pt;
+        FS_MATRIX m;
+        m.a = (float)sx; m.b = 0.0f; m.c = 0.0f; m.d = (float)sy;
+        m.e = (float)(-clipL * sx);
+        m.f = (float)(-(page_h - clipO) * sy);
+        FS_RECTF clipRect;
+        clipRect.left = 0.0f; clipRect.top = 0.0f;
+        clipRect.right = (float)w_px; clipRect.bottom = (float)h_px;
+        FPDF_RenderPageBitmapWithMatrix(bmp, page, &m, &clipRect, flags);
+    } else {
+        FPDF_RenderPageBitmap(bmp, page, 0, 0, w_px, h_px,
+                              0 /*rotation*/, flags);
+        if (form) {
+            FPDF_FFLDraw(form, bmp, page, 0, 0, w_px, h_px, 0, flags);
+        }
+    }
+    if (form) {
+        FORM_OnBeforeClosePage(page, form);
+        FPDFDOC_ExitFormFillEnvironment(form);
+        form = NULL;
+    }
 
     /* Rohpixel holen (BGRA) */
     void *buf = FPDFBitmap_GetBuffer(bmp);
@@ -426,8 +551,8 @@ PdfiumMcTextCmd(ClientData cd, Tcl_Interp *interp,
                 int objc, Tcl_Obj *const objv[])
 {
     (void)cd;
-    if (objc != 3) {
-        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+    if (objc != 3 && objc != 5) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum ?-boxes 0|1?");
         return TCL_ERROR;
     }
 
@@ -437,6 +562,18 @@ PdfiumMcTextCmd(ClientData cd, Tcl_Interp *interp,
     int pagenum;
     if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
         return TCL_ERROR;
+
+    int wantBoxes = 0;
+    if (objc == 5) {
+        const char *opt = Tcl_GetString(objv[3]);
+        if (strcmp(opt, "-boxes") != 0) {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown option \"%s\": must be -boxes", opt));
+            return TCL_ERROR;
+        }
+        if (Tcl_GetIntFromObj(interp, objv[4], &wantBoxes) != TCL_OK)
+            return TCL_ERROR;
+    }
 
     FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
     FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
@@ -470,8 +607,36 @@ PdfiumMcTextCmd(ClientData cd, Tcl_Interp *interp,
         Tcl_Obj *txt = _AnnotUtf16ToObj(interp, buf16, need);
         ckfree((char *)buf16);
 
-        Tcl_ListObjAppendElement(interp, result, Tcl_NewIntObj(mcid));
-        Tcl_ListObjAppendElement(interp, result, txt);
+        if (wantBoxes) {
+            /* ANDERE FORM, nicht dieselbe mit einem Anhaengsel: eine
+             * Liste von {mcid text {links unten rechts oben}}.
+             *
+             * Ohne die Option bleibt die flache Wechselliste, die sich
+             * wie ein dict lesen laesst. Ein drittes Element dort
+             * anzuhaengen wuerde sie still zu etwas anderem machen --
+             * "dict get" auf einer ungeraden Liste ist ein Fehler, und
+             * zwar erst beim Aufrufer.
+             *
+             * Das Rechteck ist das des TEXTOBJEKTS, nicht das eines
+             * Zeichens; fuer Zeichen gibt es charboxes.
+             */
+            Tcl_Obj *e = Tcl_NewListObj(0, NULL);
+            Tcl_ListObjAppendElement(interp, e, Tcl_NewIntObj(mcid));
+            Tcl_ListObjAppendElement(interp, e, txt);
+            float l, u, r, t;
+            Tcl_Obj *box = Tcl_NewListObj(0, NULL);
+            if (FPDFPageObj_GetBounds(po, &l, &u, &r, &t)) {
+                Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(l));
+                Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(u));
+                Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(r));
+                Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(t));
+            }
+            Tcl_ListObjAppendElement(interp, e, box);
+            Tcl_ListObjAppendElement(interp, result, e);
+        } else {
+            Tcl_ListObjAppendElement(interp, result, Tcl_NewIntObj(mcid));
+            Tcl_ListObjAppendElement(interp, result, txt);
+        }
     }
 
     Tcl_SetObjResult(interp, result);
@@ -594,9 +759,328 @@ PdfiumRotationCmd(ClientData cd, Tcl_Interp *interp,
     return TCL_OK;
 }
 
+
+
+
 /* ------------------------------------------------------------------ */
-/* pdfium::search doc-handle pagenum searchtext ?-case 0|1?           */
-/* Gibt Liste von {startpos count} zurück (Zeichenpositionen).        */
+/* pdfium::flatten doc-handle pagenum ?-mode display|print?            */
+/*                                                                     */
+/* Anmerkungen und Formularfelder in den SEITENINHALT einbrennen.       */
+/*                                                                     */
+/* Danach sind sie Zeichnung: nicht mehr anklickbar, nicht mehr         */
+/* entfernbar, aber auch nicht mehr davon abhaengig, ob ein Betrachter  */
+/* sie darstellt. Genau das meint "if you need the annotations burned   */
+/* in" -- ein Kommentar oder ein ausgefuelltes Feld, das ueberall gleich*/
+/* aussieht.                                                           */
+/*                                                                     */
+/* Das ist der Gegenweg zum Ueberlagern: dort bleibt das Original       */
+/* unberuehrt, hier wird es geaendert. Wer beides will, legt erst       */
+/* darueber und brennt dann ein.                                       */
+/*                                                                     */
+/* Rueckgabe: "flattened", "nothing" (nichts einzubrennen) -- ein       */
+/* Fehlschlag wird als Fehler gemeldet. PDFium nennt dabei KEINEN       */
+/* Grund; das steht so in fpdf_flatten.h und laesst sich hier nicht     */
+/* verbessern.                                                          */
+/*                                                                     */
+/* Die Seite ist danach im SPEICHER geaendert. Wer das behalten will,   */
+/* muss pdfium::save rufen -- sonst ist die Arbeit mit dem Schliessen   */
+/* weg.                                                                 */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumFlattenCmd(ClientData cd, Tcl_Interp *interp,
+                 int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3 && objc != 5 && objc != 7) {
+        Tcl_WrongNumArgs(interp, 1, objv,
+                         "doc-handle pagenum ?-mode display|print?"
+                         " ?-forms 0|1?");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    int flag = FLAT_NORMALDISPLAY;
+    int withForms = 0;
+    for (int i = 3; i + 1 < objc; i += 2) {
+        const char *opt = Tcl_GetString(objv[i]);
+        if (strcmp(opt, "-forms") == 0) {
+            /* Die Formularschicht VOR dem Einbrennen aufbauen.
+             *
+             * Der Grund: ein mit pdf4tcl::fillForms gefuelltes Feld
+             * traegt den Wert in /V und schaltet /NeedAppearances, laesst
+             * den Appearance-Strom aber leer. flatten brennt dann den
+             * LEEREN Strom ein -- und der Wert ist danach ganz weg,
+             * schlimmer als vorher. Gemessen am 05.09.2026: 375 dunkle
+             * Punkte vor und nach dem Einbrennen, waehrend
+             * "render -forms 1" 763 zeigte.
+             *
+             * Die Formularumgebung erzeugt die fehlenden Stroeme, und
+             * erst danach hat flatten etwas zu uebernehmen. */
+            if (Tcl_GetIntFromObj(interp, objv[i+1], &withForms) != TCL_OK)
+                return TCL_ERROR;
+            continue;
+        }
+        if (strcmp(opt, "-mode") != 0) {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown option \"%s\": must be -mode or -forms",
+                              opt));
+            return TCL_ERROR;
+        }
+        const char *mode = Tcl_GetString(objv[i+1]);
+        if (strcmp(mode, "display") == 0) {
+            flag = FLAT_NORMALDISPLAY;
+        } else if (strcmp(mode, "print") == 0) {
+            /* Der Unterschied zaehlt bei Anmerkungen, die nur fuer den
+             * Bildschirm oder nur fuers Papier gedacht sind -- dieselbe
+             * Unterscheidung wie /Usage bei den Ebenen. */
+            flag = FLAT_PRINT;
+        } else {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown mode \"%s\": must be display or print",
+                              mode));
+            return TCL_ERROR;
+        }
+    }
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    FPDF_FORMHANDLE form = NULL;
+    if (withForms) {
+        FPDF_FORMFILLINFO ffi;
+        memset(&ffi, 0, sizeof(ffi));
+        ffi.version = 1;
+        form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
+        if (form) FORM_OnAfterLoadPage(page, form);
+    }
+
+    int rc = FPDFPage_Flatten(page, flag);
+
+    if (form) {
+        FORM_OnBeforeClosePage(page, form);
+        FPDFDOC_ExitFormFillEnvironment(form);
+    }
+    FPDF_ClosePage(page);
+
+    switch (rc) {
+        case FLATTEN_SUCCESS:
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("flattened", -1));
+            return TCL_OK;
+        case FLATTEN_NOTHINGTODO:
+            /* Kein Fehler: eine Seite ohne Anmerkungen und ohne
+             * Formularfelder hat nichts einzubrennen. Das als Fehler zu
+             * melden wuerde jeden Stapellauf ueber ein Dokument
+             * abbrechen, in dem eine Seite leer ist. */
+            Tcl_SetObjResult(interp, Tcl_NewStringObj("nothing", -1));
+            return TCL_OK;
+        default:
+            PDFIUM_ERROR(interp,
+                "flatten failed (PDFium gives no reason)");
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::charboxes doc-handle pagenum ?-range {start count}?         */
+/*                                                                     */
+/* Ein Rechteck je ZEICHEN: {zeichen {links unten rechts oben}}.       */
+/*                                                                     */
+/* gettext gibt den Text, search die Rechtecke ganzer Treffer,          */
+/* pageobjects die eines Objekts. Was dazwischen fehlte, ist die        */
+/* feinste Stufe: wo steht dieses eine Zeichen. Damit laesst sich in    */
+/* einem Wort etwas hervorheben, ein Zeilenumbruch nachvollziehen oder  */
+/* Text neu setzen.                                                    */
+/*                                                                     */
+/* Ohne -range die ganze Seite -- das koennen Tausende Eintraege sein.  */
+/* Mit -range {start count} nur der Ausschnitt, und start/count sind    */
+/* genau die zwei Zahlen, die search ohne -rects zurueckgibt.          */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumCharBoxesCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3 && objc != 5) {
+        Tcl_WrongNumArgs(interp, 1, objv,
+                         "doc-handle pagenum ?-range {start count}?");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    int haveRange = 0, rStart = 0, rCount = 0;
+    if (objc == 5) {
+        const char *opt = Tcl_GetString(objv[3]);
+        if (strcmp(opt, "-range") != 0) {
+            Tcl_SetObjResult(interp,
+                Tcl_ObjPrintf("unknown option \"%s\": must be -range", opt));
+            return TCL_ERROR;
+        }
+        Tcl_Obj **rv; Tcl_Size rc;
+        if (Tcl_ListObjGetElements(interp, objv[4], &rc, &rv) != TCL_OK)
+            return TCL_ERROR;
+        if (rc != 2) {
+            Tcl_SetObjResult(interp,
+                Tcl_NewStringObj("-range needs {start count}", -1));
+            return TCL_ERROR;
+        }
+        if (Tcl_GetIntFromObj(interp, rv[0], &rStart) != TCL_OK ||
+            Tcl_GetIntFromObj(interp, rv[1], &rCount) != TCL_OK)
+            return TCL_ERROR;
+        if (rStart < 0 || rCount < 0) {
+            Tcl_SetObjResult(interp,
+                Tcl_NewStringObj("-range: start and count must not be negative",
+                                 -1));
+            return TCL_ERROR;
+        }
+        haveRange = 1;
+    }
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+    FPDF_TEXTPAGE tp = FPDFText_LoadPage(page);
+    if (!tp) {
+        FPDF_ClosePage(page);
+        PDFIUM_ERROR(interp, "cannot load text page");
+    }
+
+    int n = FPDFText_CountChars(tp);
+    int from = 0, to = n;
+    if (haveRange) {
+        from = rStart;
+        to   = rStart + rCount;
+        /* Abschneiden statt melden: ein Treffer am Seitenende darf
+         * nicht daran scheitern, dass jemand eins zu weit gezaehlt hat.
+         * Ein Bereich, der GANZ ausserhalb liegt, ergibt eine leere
+         * Liste -- auch das ist eine Antwort. */
+        if (from > n) from = n;
+        if (to   > n) to   = n;
+    }
+
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+    for (int i = from; i < to; i++) {
+        double l, r, b, t;
+        if (!FPDFText_GetCharBox(tp, i, &l, &r, &b, &t)) continue;
+        unsigned int uc = FPDFText_GetUnicode(tp, i);
+        Tcl_Obj *e = Tcl_NewListObj(0, NULL);
+        char utf[8];
+        int len = Tcl_UniCharToUtf((int)uc, utf);
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewStringObj(utf, len));
+        Tcl_Obj *box = Tcl_NewListObj(0, NULL);
+        /* PDFium gibt hier left, RIGHT, bottom, top heraus -- eine
+         * andere Reihenfolge als bei GetRect (left, top, right,
+         * bottom). Wer beide gleich behandelt, vertauscht Kanten.
+         * Nach aussen steht ueberall {links unten rechts oben}. */
+        Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(l));
+        Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(b));
+        Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(r));
+        Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(t));
+        Tcl_ListObjAppendElement(interp, e, box);
+        Tcl_ListObjAppendElement(interp, result, e);
+    }
+
+    FPDFText_ClosePage(tp);
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::pageobjects doc-handle pagenum                              */
+/*                                                                     */
+/* Woraus besteht die Seite? Liefert je Objekt                          */
+/*   {index typ {links unten rechts oben}}                             */
+/* mit typ aus text, path, image, shading, form, unknown und dem        */
+/* Rechteck in PUNKT, Seitenkoordinaten, Ursprung unten links -- also   */
+/* dieselben Zahlen wie search -rects und render -clip.                 */
+/*                                                                     */
+/* gettext sagt, WAS auf der Seite steht, structure sagt, wie es        */
+/* ausgezeichnet ist. Woraus sie GEZEICHNET ist, sagte bisher nichts:   */
+/* ob ein Kasten ein Pfad oder ein Bild ist, ob hinter dem Text ein     */
+/* Scan liegt, wo ein Form-XObject sitzt.                               */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumPageObjectsCmd(ClientData cd, Tcl_Interp *interp,
+                     int objc, Tcl_Obj *const objv[])
+{
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+    int n = FPDFPage_CountObjects(page);
+    for (int i = 0; i < n; i++) {
+        FPDF_PAGEOBJECT o = FPDFPage_GetObject(page, i);
+        if (!o) continue;
+        const char *typ;
+        switch (FPDFPageObj_GetType(o)) {
+            case FPDF_PAGEOBJ_TEXT:    typ = "text";    break;
+            case FPDF_PAGEOBJ_PATH:    typ = "path";    break;
+            case FPDF_PAGEOBJ_IMAGE:   typ = "image";   break;
+            case FPDF_PAGEOBJ_SHADING: typ = "shading"; break;
+            case FPDF_PAGEOBJ_FORM:    typ = "form";    break;
+            default:                   typ = "unknown"; break;
+        }
+        Tcl_Obj *e = Tcl_NewListObj(0, NULL);
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewIntObj(i));
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewStringObj(typ, -1));
+        float l, u, r, t;
+        Tcl_Obj *box = Tcl_NewListObj(0, NULL);
+        /* Kein Rechteck ist kein Fehler: ein leeres Objekt hat keines.
+         * Eine leere Liste sagt das, eine Liste aus Nullen wuerde
+         * behaupten, es liege in der Ecke. */
+        if (FPDFPageObj_GetBounds(o, &l, &u, &r, &t)) {
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(l));
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(u));
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(r));
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(t));
+        }
+        Tcl_ListObjAppendElement(interp, e, box);
+        Tcl_ListObjAppendElement(interp, result, e);
+    }
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::search doc-handle pagenum searchtext ?-case 0|1? ?-rects 0|1? */
+/*                                                                     */
+/* Ohne -rects: Liste von {startpos count} -- Zeichenpositionen, wie   */
+/* bisher. Mit -rects 1: {startpos count {rechteck ...}}, jedes        */
+/* Rechteck {links unten rechts oben} in PUNKT im Seitenkoordinaten-   */
+/* system (Ursprung unten links), also genau die Zahlen, mit denen ein */
+/* Stempel oder ein Streichstrich gesetzt wird.                        */
+/*                                                                     */
+/* WARUM MEHRERE Rechtecke je Treffer: ein Fundstueck kann ueber einen */
+/* Zeilenumbruch gehen oder in mehreren Textstuecken stehen. PDFium    */
+/* liefert dann ein Rechteck je zusammenhaengendem Stueck. Ein einziges*/
+/* Rechteck zurueckzugeben hiesse, den Umbruchfall stillschweigend     */
+/* falsch zu zeichnen.                                                 */
+/*                                                                     */
+/* Ohne diese Angabe war "dieses Wort durchstreichen" nicht machbar:   */
+/* die Zeichenposition sagt, DASS etwas da ist, nicht WO.              */
 /* ------------------------------------------------------------------ */
 static int
 PdfiumSearchCmd(ClientData cd, Tcl_Interp *interp,
@@ -617,16 +1101,29 @@ PdfiumSearchCmd(ClientData cd, Tcl_Interp *interp,
         return TCL_ERROR;
 
     int casesensitive = 0;
-    if (objc >= 6) {
-        const char *opt = Tcl_GetString(objv[4]);
+    int wantRects = 0;
+    /* Die Optionen paarweise durchgehen. Vorher wurde nur EIN Paar an
+     * fester Stelle gelesen (objv[4]/objv[5]); ein zweites blieb
+     * unbemerkt liegen, statt gemeldet zu werden. */
+    if (((objc - 4) % 2) != 0) {
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj("option without value", -1));
+        return TCL_ERROR;
+    }
+    for (int i = 4; i < objc; i += 2) {
+        const char *opt = Tcl_GetString(objv[i]);
         if (strcmp(opt, "-case") == 0) {
             /* The result was not checked: "search doc 0 wort -case ja"
              * left casesensitive at 0 and reported success. */
-            if (Tcl_GetIntFromObj(interp, objv[5], &casesensitive) != TCL_OK)
+            if (Tcl_GetIntFromObj(interp, objv[i+1], &casesensitive) != TCL_OK)
+                return TCL_ERROR;
+        } else if (strcmp(opt, "-rects") == 0) {
+            if (Tcl_GetIntFromObj(interp, objv[i+1], &wantRects) != TCL_OK)
                 return TCL_ERROR;
         } else {
             Tcl_SetObjResult(interp,
-                Tcl_ObjPrintf("unknown option \"%s\": must be -case", opt));
+                Tcl_ObjPrintf("unknown option \"%s\": must be -case or -rects",
+                              opt));
             return TCL_ERROR;
         }
     }
@@ -662,6 +1159,29 @@ PdfiumSearchCmd(ClientData cd, Tcl_Interp *interp,
         Tcl_Obj *hit = Tcl_NewListObj(0, NULL);
         Tcl_ListObjAppendElement(interp, hit, Tcl_NewIntObj(pos));
         Tcl_ListObjAppendElement(interp, hit, Tcl_NewIntObj(cnt));
+        if (wantRects) {
+            /* CountRects MUSS vor GetRect laufen: es rechnet die
+             * Rechtecke aus und legt sie ab, GetRect holt sie nur.
+             * Ohne den Aufruf liefert GetRect Nullen. */
+            Tcl_Obj *rects = Tcl_NewListObj(0, NULL);
+            int nr = FPDFText_CountRects(tp, pos, cnt);
+            for (int r = 0; r < nr; r++) {
+                double left, top, right, bottom;
+                if (!FPDFText_GetRect(tp, r, &left, &top, &right, &bottom))
+                    continue;
+                Tcl_Obj *rc = Tcl_NewListObj(0, NULL);
+                /* In der Reihenfolge {links unten rechts oben} -- wie ein
+                 * PDF-Rechteck (/MediaBox, /Rect) geschrieben wird.
+                 * PDFium gibt top vor bottom heraus; wer das eins zu eins
+                 * durchreicht, vertauscht sie an der naechsten Stelle. */
+                Tcl_ListObjAppendElement(interp, rc, Tcl_NewDoubleObj(left));
+                Tcl_ListObjAppendElement(interp, rc, Tcl_NewDoubleObj(bottom));
+                Tcl_ListObjAppendElement(interp, rc, Tcl_NewDoubleObj(right));
+                Tcl_ListObjAppendElement(interp, rc, Tcl_NewDoubleObj(top));
+                Tcl_ListObjAppendElement(interp, rects, rc);
+            }
+            Tcl_ListObjAppendElement(interp, hit, rects);
+        }
         Tcl_ListObjAppendElement(interp, result, hit);
     }
 
@@ -2668,6 +3188,12 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumRotationCmd,   NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::search",
                          PdfiumSearchCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::pageobjects",
+                         PdfiumPageObjectsCmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::charboxes",
+                         PdfiumCharBoxesCmd,   NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::flatten",
+                         PdfiumFlattenCmd,     NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::links",
                          PdfiumLinksCmd,      NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::structure",

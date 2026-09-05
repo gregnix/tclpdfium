@@ -7,7 +7,7 @@ metadata, search, bookmarks, form fields and annotations directly from
 Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
 delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.6.1  
+**Version:** 0.6.2  
 **License:** BSD  
 **Platform:** Linux x86_64, Windows x64 (MinGW, cross-built or native)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
@@ -290,6 +290,65 @@ tclpdfium/
 ---
 
 ## Changes
+
+### 0.6.2
+
+- **`::pdfium::search -rects 1`** returns the rectangles of each hit, not
+  only the character position. A hit becomes `{startpos count {rect ...}}`,
+  each rect `{left bottom right top}` in points, page coordinates, origin
+  bottom left -- the numbers a strike-through line or a highlight is drawn
+  with. Until now the position said *that* something is there, not *where*;
+  crossing a word out in a foreign PDF was not possible.
+
+  Several rectangles per hit are normal: a match can run across a line
+  break or sit in more than one text run, and PDFium returns one rectangle
+  per contiguous piece. Returning only the first would draw the line-break
+  case silently wrong.
+
+- **`::pdfium::render -clip {left bottom right top}`** renders only that
+  part of the page. Every zoom used to build the whole page; on an A0
+  drawing that is the difference between usable and not.
+
+- **`::pdfium::render -printing 1`** renders the way a printer would
+  (`FPDF_PRINTING`). This makes `/Usage /Print /PrintState /OFF`
+  measurable instead of believed. Measured on pdf4tcl's demo-layers.pdf:
+  58656 dark pixels on screen, 52782 when printing, and the difference is
+  exactly the layer marked `-print 0`.
+
+- **`::pdfium::pageobjects`** reports what a page is made of: one entry
+  `{index type {left bottom right top}}` per object, with type `text`,
+  `path`, `image`, `shading`, `form` or `unknown`. `gettext` says what is
+  on the page, `structure` how it is tagged; what it is drawn from was
+  not available.
+
+- **`::pdfium::charboxes`** gives one rectangle per character, optionally
+  for a `-range {start count}` -- exactly the two numbers `search` returns
+  without `-rects`. Where a single character sits was not available.
+
+- **`::pdfium::mctext -boxes 1`** adds the rectangle of each text object.
+  It returns a different shape (triples) on purpose: appending a third
+  element to the flat alternating list would silently break `dict get`
+  at the caller.
+
+- **`::pdfium::render -forms 1`** draws form fields as well, and the
+  viewer uses it. Without it a filled field is listed by `formfields` but
+  missing from the picture: PDFium draws widget annotations through the
+  form layer, not with the page contents.
+
+- **`::pdfium::flatten`** burns annotations and form fields into the page
+  contents. Afterwards they are drawing -- not clickable, not removable,
+  but not dependent on the viewer either. The opposite of overlaying:
+  there the original stays untouched, here it is changed. Returns
+  `nothing` when there is nothing to burn in, which is not an error.
+
+- **The viewer searches and highlights.** `app/viewer4.tcl` has a search
+  box; hits are marked on the page. Possible only since `search -rects 1`
+  -- before, a hit said the word is on the page, not where.
+
+- **`search` reads its options in pairs.** Only one pair at a fixed
+  position was read before, so `search $doc 0 word -case 1 -rects 1` would
+  have dropped the rectangles without a word. An option without a value is
+  now reported.
 
 ### 0.6.1
 
