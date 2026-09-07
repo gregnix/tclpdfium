@@ -1,0 +1,205 @@
+# viewer-forms.test -- app/viewer4.tcl so bedienen, wie ein Mensch es tut
+#
+# WARUM ES DIESE DATEI GIBT:
+#
+# Am 06.09.2026 meldete ein Benutzer: "Schreibmarke gesetzt" stand da,
+# und es liess sich nichts eingeben. Die Suite war gruen -- 84 Tests,
+# kein Fehler. Sie mass die Teile einzeln: editclick trifft, editchar
+# tippt, formfields liest. Jedes Stueck stimmte.
+#
+# Was fehlte, war die REIHENFOLGE. Der Benutzer klickt erst in die
+# Feldliste, dann auf die Seite. Damit ist der Tastaturfokus weg, und
+# der Klick auf den Canvas holte ihn nicht zurueck.
+#
+# Diese Datei spielt solche Folgen nach. Sie prueft nicht, ob ein Befehl
+# tut, was er soll -- das tut basic.test --, sondern ob die Bedienung
+# aufgeht.
+#
+# WICHTIG fuer die Nachbildung: "event generate" mit einem
+# Tastenereignis geht an das FOKUSFENSTER, nicht an das Widget, das man
+# angibt. Gemessen:
+#
+#     focus -force .e
+#     event generate .c <Key-X>   ->  kam bei .e an
+#
+# Genau deshalb kann ein Tk-Test einen fehlenden Fokus ueberhaupt
+# bemerken. Wer stattdessen die Bindungsprozedur direkt aufruft, umgeht
+# den Fokus -- und misst wieder nur das Stueck statt der Bedienung.
+
+package require tcltest 2.5
+namespace import ::tcltest::*
+
+package require Tk
+package require pdfiumtcl
+
+set here [file dirname [file normalize [info script]]]
+set ::formular [file join $here fixtures form.pdf]
+testConstraint haveFormPdf [file readable $::formular]
+
+# viewer4.tcl haelt seinen Zustand global und baut in ".". Es einmal zu
+# laden und dann zu bedienen ist naeher an der Wirklichkeit als ein
+# Nachbau -- ein Nachbau haette den Fehler nicht gehabt.
+if {[file readable [file join $here .. app viewer4.tcl]]} {
+    set ::argv [list $::formular]
+    set ::argc 1
+    source [file join $here .. app viewer4.tcl]
+    # WARTEN, bis das Dokument offen ist.
+    #
+    # viewer4 oeffnet verzoegert ("after idle"), damit das Fenster
+    # zuerst steht. Ein Test, der sofort nachsieht, misst den Zustand
+    # VOR dem Oeffnen -- und meldet einen Fehler, den es nicht gibt.
+    # Genau so ist mir dieser Test beim ersten Lauf umgefallen.
+    set ::wartete 0
+    while {$::state(doc) eq "" && $::wartete < 50} {
+        after 100 {set ::weiter 1}
+        vwait ::weiter
+        incr ::wartete
+        update
+    }
+    testConstraint haveViewer [expr {$::state(doc) ne ""}]
+} else {
+    testConstraint haveViewer 0
+}
+
+# Die Mitte eines Feldes in Canvas-Pixel.
+proc feldMitteCanvas {nr} {
+    global state
+    set e [lindex [pdfium::formfields $state(doc) $state(page)] $nr]
+    lassign [lindex $e 4] l u r o
+    lassign [pdfium::pagesize $state(doc) $state(page)] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width  pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    return [list [expr {int((($l + $r) / 2.0) * $sx)}] \
+                 [expr {int(($hpt - ($u + $o) / 2.0) * $sy)}]]
+}
+
+proc feldWert {nr} {
+    global state
+    return [lindex [lindex [pdfium::formfields $state(doc) $state(page)] $nr] 2]
+}
+
+test viewer-forms-1.1 {die Sitzung laeuft ohne Zutun} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # Kein Knopf, kein Modus: wer ein Formular oeffnet, soll schreiben
+    # koennen. Ein Modus, den man erst findet, ist keiner.
+    expr {$::state(edit) ne ""}
+} -result 1
+
+test viewer-forms-1.2 {erst in die Liste klicken, DANN auf die Seite} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # DIE REIHENFOLGE, an der es gescheitert ist.
+    #
+    # Der Benutzer waehlt ein Feld in der Liste -- damit hat die Liste
+    # den Tastaturfokus. Dann klickt er auf die Seite und tippt. Holt
+    # der Klick den Fokus nicht zurueck, kommt keine Taste an, und die
+    # Statuszeile sagt trotzdem "Schreibmarke gesetzt".
+    #
+    # "event generate" folgt dem Fokus -- also faellt genau das hier auf.
+    set tv .pw.right.nb.form.tv
+    focus -force $tv
+    update
+
+    lassign [feldMitteCanvas 0] cx cy
+    tippenKlick $cx $cy
+    update
+
+    set vorher [feldWert 0]
+    event generate . <Key-X> -keysym X
+    update
+    tippenAus
+    update
+    set nachher [feldWert 0]
+    list [expr {[focus] eq ".pw.left.c"}] [expr {$nachher ne $vorher}]
+} -result {1 1}
+
+test viewer-forms-1.3 {ein Klick markiert das Feld sichtbar} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # Auf dem Bildschirmfoto war nach dem Klick nichts zu sehen -- das
+    # Feld sah aus wie vorher. Eine Rueckmeldung, die es nicht gibt,
+    # laesst den Benutzer glauben, es sei nichts passiert.
+    tippenAn 1
+    update
+    lassign [feldMitteCanvas 0] cx cy
+    tippenKlick $cx $cy
+    update
+    set n [llength [.pw.left.c find withtag feldmark]]
+    tippenAus 1
+    expr {$n > 0}
+} -result 1
+
+test viewer-forms-1.4 {die Statuszeile ist breit genug fuer ihre Texte} \
+        -constraints haveViewer -body {
+    # "Schreibmarke gesetzt -- tippen" kam in der Werkzeugleiste als
+    # "eibmarke gesetzt -- ti" an: ein Label mit -width 16 zwischen den
+    # Knoepfen. Ich habe ein Dutzend Meldungen geschrieben und keine je
+    # ganz gesehen.
+    #
+    # Geprueft wird die ANORDNUNG, nicht der Text: die Statuszeile muss
+    # ein eigenes Fenster ueber die volle Breite sein und darf nicht in
+    # der Werkzeugleiste haengen.
+    list [winfo exists .status] \
+         [expr {[winfo parent .status] eq "."}] \
+         [lindex [pack info .status] [expr {[lsearch [pack info .status] -side] + 1}]]
+} -result {1 1 bottom}
+
+test viewer-forms-2.1 {tippen, speichern, wieder oeffnen} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # DIE FOLGE, DIE NIE IN EINEM STUECK GEMESSEN WURDE.
+    #
+    # Die Teile einzeln waren geprueft: tippen wirkt, "Gefuellt
+    # speichern" schreibt eine Datei, formfields liest. Ob sie in DIESER
+    # Reihenfolge zusammengehen, stand nirgends -- und genau das ist die
+    # Sorte Luecke, an der heute schon dreimal etwas haengengeblieben
+    # ist.
+    #
+    # Heikel daran: PDFium schreibt den Feldinhalt erst beim
+    # FOKUSVERLUST fest. Wer waehrend einer offenen Sitzung speichert,
+    # koennte den zuletzt getippten Wert verlieren -- er steht dann in
+    # der Sitzung und nicht im Dokument.
+    set aus [file join [temporaryDirectory] vf-[pid].pdf]
+    file delete $aus
+
+    tippenAn 1
+    update
+    lassign [feldMitteCanvas 0] cx cy
+    tippenKlick $cx $cy
+    update
+    focus -force .pw.left.c
+    foreach z {V r e d e n} { event generate . <Key> -keysym $z }
+    update
+
+    # OHNE vorher zu beenden -- so wuerde ein Benutzer es tun: tippen,
+    # dann auf den Knopf.
+    proc tk_getSaveFile {args} [list return $aus]
+    demo_formSave
+    update
+    catch {rename tk_getSaveFile {}}
+
+    set gefunden ""
+    if {[file exists $aus]} {
+        set e [pdfium::open $aus]
+        set gefunden [lindex [lindex [pdfium::formfields $e 0] 0] 2]
+        pdfium::close $e
+    }
+    tippenAus 1
+    file delete $aus
+    list [file exists $aus] [string match "*Vreden*" $gefunden]
+} -result {0 1}
+
+test viewer-forms-2.2 {die Vorlage wird nicht ueberschrieben} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # Derselbe Name wie die geoeffnete Datei muss abgelehnt werden --
+    # sonst ist die leere Vorlage weg, und zwar unwiderruflich.
+    set gemeldet 0
+    proc tk_getSaveFile {args} [list return $::formular]
+    proc tk_messageBox {args} {set ::gemeldet 1 ; return ok}
+    set vorher [file size $::formular]
+    demo_formSave
+    catch {rename tk_getSaveFile {}}
+    catch {rename tk_messageBox {}}
+    list $::gemeldet [expr {[file size $::formular] == $vorher}]
+} -result {1 1}
+
+
+::tcltest::cleanupTests

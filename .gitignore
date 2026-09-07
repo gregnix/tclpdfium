@@ -41,3 +41,11 @@ tests/*.result
 
 # --- Nicht-oeffentlich -------------------------------------------------------
 nogit/
+
+# --- Sicherungsdateien -------------------------------------------------------
+# autoconf legt beim Neuerzeugen ein "configure~" an; Editoren machen dasselbe
+# mit anderen Dateien. Ohne diese Zeile wandert es beim naechsten "git add -A"
+# mit ins Repository -- gemerkt am 05.09.2026 vor dem Push.
+*~
+*.orig
+*.rej

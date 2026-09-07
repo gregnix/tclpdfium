@@ -96,27 +96,44 @@ set ::sample [file join [file dirname [file normalize [info script]]] \
         fixtures sample.pdf]
 testConstraint havePdf [file readable $::sample]
 
+# Tk fuer die Renderpruefungen. NICHT "haveWidget" benutzen: das steht in
+# pdfview.test und ist hier unbekannt -- eine unbekannte Bedingung laesst
+# tcltest still ueberspringen, und der Lauf meldet gruen, ohne gemessen
+# zu haben.
+#
+# UND WEIT OBEN, vor dem ersten Test, der sie braucht. Sie stand bis zum
+# 06.09.2026 unten, waehrend die Tests 2.11 bis 2.13 sie schon oben
+# verlangten -- die drei liefen darum NIE. Im Lauf erschienen sie als
+# "3 skipped for haveWidget", und das sah nach einer fehlenden Anzeige
+# aus statt nach einem Fehler in der Reihenfolge.
+testConstraint haveTk [expr {![catch {package require Tk}]}]
+
 # Ein getaggtes PDF fuer die Strukturpruefungen. Ohne eines gibt es
 # nichts zu messen -- dann UEBERSPRINGEN statt gruen melden.
 set ::tagged [file join [file dirname [file normalize [info script]]] \
         fixtures tagged.pdf]
 testConstraint haveTagged [file readable $::tagged]
 
-test pdfiumtcl-2.1 {render refuses an unknown option} -constraints havePdf -setup {
+# Die Namen tragen ein "a", weil es 2.1 bis 2.3 und 3.1 schon weiter
+# oben gibt. Doppelte Testnamen sind nicht bloss unschoen: eine
+# Ersetzung, die nach "test pdfiumtcl-2.1" sucht, trifft das falsche --
+# genau das ist mir am 06.09.2026 passiert, und ich habe die Bedingung
+# an einem Test geaendert, der sie nicht brauchte.
+test pdfiumtcl-2.1a {render refuses an unknown option} -constraints {havePdf haveTk} -setup {
     set d [pdfium::open $::sample]
 } -body {
     catch {pdfium::render $d 0 -scale 2.0} e
     expr {[string match {*unknown option*-scale*} $e]}
 } -cleanup {pdfium::close $d} -result 1
 
-test pdfiumtcl-2.2 {render names the options it knows} -constraints havePdf -setup {
+test pdfiumtcl-2.2a {render names the options it knows} -constraints {havePdf haveTk} -setup {
     set d [pdfium::open $::sample]
 } -body {
     catch {pdfium::render $d 0 -quatsch 1} e
     expr {[string match {*-dpi*-width*-imagename*} $e]}
 } -cleanup {pdfium::close $d} -result 1
 
-test pdfiumtcl-2.3 {a missing value is refused} -constraints havePdf -setup {
+test pdfiumtcl-2.3a {a missing value is refused} -constraints {havePdf haveTk} -setup {
     set d [pdfium::open $::sample]
 } -body {
     # Dropping the last word silently hides a typo in the caller.
@@ -208,7 +225,7 @@ test pdfiumtcl-2.10 {eine Option ohne Wert wird gemeldet} -constraints havePdf -
 # ---------------------------------------------------------------------------
 
 test pdfiumtcl-2.11 {render -clip liefert nur den Ausschnitt} \
-        -constraints {havePdf haveWidget} -setup {
+        -constraints {havePdf haveTk} -setup {
     set d [pdfium::open $::sample]
 } -body {
     # Ohne das muss jeder Zoom die GANZE Seite bauen; bei einer
@@ -227,7 +244,7 @@ test pdfiumtcl-2.11 {render -clip liefert nur den Ausschnitt} \
 } -cleanup {pdfium::close $d} -result {1 1}
 
 test pdfiumtcl-2.12 {-clip prueft die Form des Rechtecks} \
-        -constraints {havePdf haveWidget} -setup {
+        -constraints {havePdf haveTk} -setup {
     set d [pdfium::open $::sample]
 } -body {
     set e1 ""; set e2 ""
@@ -238,7 +255,7 @@ test pdfiumtcl-2.12 {-clip prueft die Form des Rechtecks} \
 } -cleanup {pdfium::close $d} -result {1 1}
 
 test pdfiumtcl-2.13 {-printing rendert, wie ein Drucker es taete} \
-        -constraints {havePdf haveWidget} -setup {
+        -constraints {havePdf haveTk} -setup {
     set d [pdfium::open $::sample]
 } -body {
     # Damit laesst sich MESSEN, ob eine Ebene mit /PrintState /OFF beim
@@ -381,12 +398,6 @@ test pdfiumtcl-2.20 {mctext -boxes aendert die FORM, nicht nur den Inhalt} \
 set ::formular [file join [file dirname [file normalize [info script]]] \
         fixtures form.pdf]
 testConstraint haveFormPdf [file readable $::formular]
-
-# Tk fuer die Renderpruefungen. NICHT "haveWidget" benutzen: das steht in
-# pdfview.test und ist hier unbekannt -- eine unbekannte Bedingung laesst
-# tcltest still ueberspringen, und der Lauf meldet gruen, ohne gemessen
-# zu haben. Gemessen am 05.09.2026: zwei Tests wurden so uebergangen.
-testConstraint haveTk [expr {![catch {package require Tk}]}]
 
 # Ein Formular, das mit pdf4tcl::fillForms gefuellt wurde: /V gesetzt,
 # /NeedAppearances an, Appearance-Strom LEER. Genau der Fall, an dem
@@ -532,6 +543,945 @@ test pdfiumtcl-2.27 {flatten -forms rettet einen mit fillForms gesetzten Wert} \
 } -result {0 1}
 
 
+test pdfiumtcl-2.28 {pageobjects -marks nennt die Markennamen} \
+        -constraints haveTagged -setup {
+    set d [pdfium::open $::tagged]
+} -body {
+    # Ohne die Namen ist ein Artefakt -- Kopfzeile, Seitenzahl -- nicht
+    # von unausgezeichnetem Text zu unterscheiden: beide tragen keine
+    # MCID. Gemessen an pdf4tcls demo-tagged.pdf, wo ein Pruefer genau
+    # deshalb korrekte Artefakte anmeckerte.
+    set mitMarken 0
+    set vierElemente 1
+    foreach e [pdfium::pageobjects $d 0 -marks 1] {
+        if {[llength $e] != 4} { set vierElemente 0 }
+        if {[llength [lindex $e 3]]} { incr mitMarken }
+    }
+    list $vierElemente [expr {$mitMarken > 0}]
+} -cleanup {pdfium::close $d} -result {1 1}
+
+test pdfiumtcl-2.29 {ohne -marks bleibt es ein Tripel} -constraints haveTagged -setup {
+    set d [pdfium::open $::tagged]
+} -body {
+    # Rueckwaertsvertraeglich: wer die Namen nicht anfordert, bekommt
+    # genau das, was er vorher bekam.
+    set dreier 1
+    foreach e [pdfium::pageobjects $d 0] {
+        if {[llength $e] != 3} { set dreier 0 }
+    }
+    set dreier
+} -cleanup {pdfium::close $d} -result 1
+
+
+test pdfiumtcl-2.30 {catalog: getaggt und Sprache} -constraints haveTagged -setup {
+    set d [pdfium::open $::tagged]
+} -body {
+    # Die Frage "ist das Dokument ausgezeichnet" gehoert ans DOKUMENT.
+    # Ueber einen leeren Strukturbaum beantwortet, ist sie nicht von
+    # "diese eine Seite hat nichts" zu unterscheiden.
+    set k [pdfium::catalog $d]
+    list [dict get $k tagged] [expr {[dict get $k language] ne ""}]
+} -cleanup {pdfium::close $d} -result {1 1}
+
+test pdfiumtcl-2.31 {catalog an einem ungetaggten Dokument} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    # Und die Gegenprobe: ohne sie waere nicht gemessen, ob "tagged"
+    # ueberhaupt zwischen zwei Dokumenten unterscheidet.
+    set k [pdfium::catalog $d]
+    list [dict get $k tagged] [dict get $k language]
+} -cleanup {pdfium::close $d} -result {0 {}}
+
+
+test pdfiumtcl-2.32 {Anhaenge: anlegen, speichern, wiederfinden} \
+        -constraints havePdf -body {
+    # Der ganze Weg, nicht nur das Anlegen: ohne Speichern und
+    # Wiederoeffnen misst man nur den Speicher, nicht die Datei.
+    set aus [file join [temporaryDirectory] anh-[pid].pdf]
+    set d [pdfium::open $::sample]
+    set vorher [llength [pdfium::attachments $d]]
+    pdfium::addattachment $d "beleg.xml" \
+            [encoding convertto utf-8 "<rechnung>42</rechnung>"]
+    pdfium::addattachment $d "notiz.txt" [encoding convertto utf-8 "zwei"]
+    pdfium::save $d $aus
+    pdfium::close $d
+
+    set e [pdfium::open $aus]
+    set liste [pdfium::attachments $e]
+    set namen {}
+    set groessen {}
+    foreach a $liste {
+        lappend namen [lindex $a 1]
+        lappend groessen [lindex $a 2]
+    }
+    set inhalt [encoding convertfrom utf-8 [pdfium::attachment $e 0]]
+    pdfium::close $e
+    file delete $aus
+    list $vorher $namen $groessen $inhalt
+    # Der Erwartungswert OHNE Klammern um das letzte Element: Tcl setzt
+    # sie nur, wo ein Element Leerzeichen enthaelt. Mit Klammern
+    # geschrieben fiel der Test -- an meiner Schreibweise, nicht an der
+    # Sache.
+} -result {0 {beleg.xml notiz.txt} {23 4} <rechnung>42</rechnung>}
+
+test pdfiumtcl-2.33 {ein Anhang ist eine BYTEFOLGE, keine Zeichenkette} \
+        -constraints havePdf -body {
+    # Sonst ginge er durch die Systemkodierung -- und ein PNG oder eine
+    # ZIP-Datei kaeme veraendert wieder heraus. Geprueft mit Bytes, die
+    # in keiner Textkodierung ueberleben.
+    set roh [binary format H* "00FF0A1B7F80"]
+    set aus [file join [temporaryDirectory] anh2-[pid].pdf]
+    set d [pdfium::open $::sample]
+    pdfium::addattachment $d "roh.bin" $roh
+    pdfium::save $d $aus
+    pdfium::close $d
+    set e [pdfium::open $aus]
+    set zurueck [pdfium::attachment $e 0]
+    pdfium::close $e
+    file delete $aus
+    expr {$zurueck eq $roh}
+} -result 1
+
+test pdfiumtcl-2.34 {Loeschen und ein Index ausserhalb} -constraints havePdf -body {
+    set d [pdfium::open $::sample]
+    pdfium::addattachment $d "eins.txt" [encoding convertto utf-8 "a"]
+    pdfium::addattachment $d "zwei.txt" [encoding convertto utf-8 "b"]
+    set rest [pdfium::delattachment $d 0]
+    # Ueber den INDEX, nicht ueber den Namen: Namen duerfen sich
+    # wiederholen, und wer nach Namen loeschte, traefe womoeglich den
+    # falschen, ohne es zu merken.
+    set uebrig [lindex [lindex [pdfium::attachments $d] 0] 1]
+    catch {pdfium::delattachment $d 5} e1
+    catch {pdfium::attachment $d 5} e2
+    pdfium::close $d
+    list $rest $uebrig [string match "*out of range*" $e1] \
+         [string match "*out of range*" $e2]
+} -result {1 zwei.txt 1 1}
+
+
+# Eine Datei mit einem /Sig-Woerterbuch. Der Contents-Block ist
+# Fuellmaterial: geprueft wird das LESEN der Felder, nicht die
+# Kryptographie -- die prueft PDFium ohnehin nicht.
+set ::signiert [file join [file dirname [file normalize [info script]]] \
+        fixtures signed.pdf]
+testConstraint haveSignedPdf [file readable $::signiert]
+
+test pdfiumtcl-2.35 {Signaturen: die Felder kommen richtig heraus} \
+        -constraints haveSignedPdf -setup {
+    set d [pdfium::open $::signiert]
+} -body {
+    # subfilter und time sind 7-Bit-ASCII, reason ist UTF-16LE -- drei
+    # Kodierungen in einer Schnittstelle. Wer sie gleich behandelt,
+    # bekommt bei "reason" jedes zweite Zeichen als Null; dieser Test
+    # faellt dann.
+    set s [lindex [pdfium::signatures $d] 0]
+    list [dict get $s subfilter] [dict get $s reason] \
+         [string range [dict get $s time] 0 9] \
+         [llength [dict get $s ranges]] [dict get $s size]
+} -cleanup {pdfium::close $d} -result \
+    {adbe.pkcs7.detached {Pruefung der Lesefunktion} D:20260906 4 64}
+
+test pdfiumtcl-2.36 {ohne Signatur eine leere Liste} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    # Leer heisst "keine", nicht "unbekannt" -- und ist kein Fehler.
+    # Ohne diese Gegenprobe waere nicht gemessen, ob "signatures"
+    # ueberhaupt zwischen zwei Dokumenten unterscheidet.
+    llength [pdfium::signatures $d]
+} -cleanup {pdfium::close $d} -result 0
+
+test pdfiumtcl-2.37 {an keinem Feld haengt ein Nullbyte} \
+        -constraints haveSignedPdf -setup {
+    set d [pdfium::open $::signiert]
+} -body {
+    # Die Laengenangabe von PDFium schliesst die abschliessende Null
+    # ein. Ohne Abschneiden haengt an jedem ASCII-Wert ein Nullbyte --
+    # und das faellt erst auf, wenn jemand vergleicht.
+    set s [lindex [pdfium::signatures $d] 0]
+    set schlecht 0
+    foreach k {subfilter time reason} {
+        if {[string first "\u0000" [dict get $s $k]] >= 0} { incr schlecht }
+    }
+    set schlecht
+} -cleanup {pdfium::close $d} -result 0
+
+
+test pdfiumtcl-2.38 {Anmerkung anlegen, speichern, wiederfinden} \
+        -constraints havePdf -body {
+    # Der ganze Weg. Ohne Speichern und Wiederoeffnen misst man nur den
+    # Speicher, nicht die Datei.
+    set aus [file join [temporaryDirectory] ann-[pid].pdf]
+    set d [pdfium::open $::sample]
+    set vorher [llength [pdfium::annot_list $d 0]]
+    set i [pdfium::addannot $d 0 highlight {50 100 200 120} \
+            -color {1 1 0} -opacity 0.5 -contents "hier nachsehen" \
+            -author "Gregor"]
+    pdfium::save $d $aus
+    pdfium::close $d
+
+    set e [pdfium::open $aus]
+    set liste [pdfium::annot_list $e 0]
+    lassign [lindex $liste 0] typ box inhalt autor
+    pdfium::close $e
+    file delete $aus
+    list $vorher $i [llength $liste] $typ $inhalt $autor
+} -result {0 0 1 highlight {hier nachsehen} Gregor}
+
+test pdfiumtcl-2.39 {eine Textmarkierung wird auch GEZEICHNET} \
+        -constraints {havePdf haveTk} -body {
+    # DIE Frage bei dieser Entscheidung: wir schreiben KEINEN
+    # Appearance-Strom. Ohne /AP zeichnen Betrachter die Markierung aus
+    # /QuadPoints und /C selbst -- wenn sie es tun. Dieser Test misst,
+    # dass pdfium es tut; ohne ihn waere die Zusage eine Vermutung.
+    set aus [file join [temporaryDirectory] ann2-[pid].pdf]
+    set d [pdfium::open $::sample]
+    pdfium::render $d 0 -dpi 100 -imagename ::annVor
+    pdfium::addannot $d 0 highlight {20 40 120 60} -color {1 1 0}
+    pdfium::save $d $aus
+    pdfium::close $d
+    set e [pdfium::open $aus]
+    pdfium::render $e 0 -dpi 100 -imagename ::annNach
+    pdfium::close $e
+    file delete $aus
+    set n 0 ; set m 0
+    foreach {bild var} {::annVor n ::annNach m} {
+        for {set y 0} {$y < [image height $bild]} {incr y 2} {
+            foreach z [$bild data -from 0 $y [image width $bild] \
+                    [expr {$y+1}]] {
+                foreach px $z { if {$px ne "#ffffff"} { incr $var } }
+            }
+        }
+    }
+    image delete ::annVor ::annNach
+    expr {$m > $n}
+} -result 1
+
+test pdfiumtcl-2.40 {addannot prueft Typ, Rechteck und Optionen} \
+        -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    set e1 ""; set e2 ""; set e3 ""; set e4 ""
+    catch {pdfium::addannot $d 0 kringel {1 2 3 4}} e1
+    catch {pdfium::addannot $d 0 highlight {1 2 3}} e2
+    catch {pdfium::addannot $d 0 highlight {100 100 50 200}} e3
+    catch {pdfium::addannot $d 0 highlight {1 2 3 4} -bogus x} e4
+    list [string match "*must be highlight*" $e1] \
+         [string match "*left bottom right top*" $e2] \
+         [string match "*must exceed*" $e3] \
+         [string match "*must be -color*" $e4]
+} -cleanup {pdfium::close $d} -result {1 1 1 1}
+
+test pdfiumtcl-2.41 {Anmerkung entfernen} -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    pdfium::addannot $d 0 square {10 10 50 50}
+    pdfium::addannot $d 0 text {60 60 80 80} -contents "Notiz"
+    set rest [pdfium::delannot $d 0 0]
+    catch {pdfium::delannot $d 0 9} e
+    list $rest [llength [pdfium::annot_list $d 0]] \
+         [string match "*out of range*" $e]
+} -cleanup {pdfium::close $d} -result {1 1 1}
+
+
+# ---------------------------------------------------------------------------
+# pdfiumtcl-2.42 bis 2.44  formfields ueber die Formular-Schnittstelle
+# ---------------------------------------------------------------------------
+
+set ::multiWidget [file join [file dirname [file normalize [info script]]] \
+        fixtures form-multiwidget.pdf]
+set ::nestedForm [file join [file dirname [file normalize [info script]]] \
+        fixtures form-nested.pdf]
+testConstraint haveMultiWidget [file readable $::multiWidget]
+testConstraint havePdf4tcl [expr {![catch {package require pdf4tcl}]}]
+testConstraint haveNestedForm  [file readable $::nestedForm]
+
+test pdfiumtcl-2.42 {formfields loest geerbte Werte auf} \
+        -constraints haveMultiWidget -setup {
+    set d [pdfium::open $::multiWidget]
+} -body {
+    # Bis hierher wurden /T, /V und /FT mit FPDFAnnot_GetStringValue
+    # direkt am WIDGET gelesen. Stehen sie am Vater und werden nur
+    # geerbt (ISO 32000-1 12.7.3.1), sah das Widget nichts:
+    #
+    #     {widget {} {}} {widget {} {}}
+    #
+    # Typ, Name und Wert leer -- ohne jede Meldung. Gemeldet aus einer
+    # Durchsicht am 06.09.2026, nachgemessen.
+    set f [pdfium::formfields $d 0]
+    set namen {} ; set typen {}
+    foreach e $f { lappend typen [lindex $e 0] ; lappend namen [lindex $e 1] }
+    list [llength $f] $typen $namen
+} -cleanup {pdfium::close $d} -result {2 {text text} {kunde kunde}}
+
+test pdfiumtcl-2.43 {und setzt verschachtelte Namen zusammen} \
+        -constraints haveNestedForm -setup {
+    set d [pdfium::open $::nestedForm]
+} -body {
+    # Der volle Name ist die Kette der /T vom Wurzelfeld herab
+    # (12.7.3.2). Vorher kam nur "city".
+    lindex [lindex [pdfium::formfields $d 0] 0] 1
+} -cleanup {pdfium::close $d} -result person.city
+
+test pdfiumtcl-2.44 {jedes Feld nennt Flaggen und Rechteck} \
+        -constraints haveMultiWidget -setup {
+    set d [pdfium::open $::multiWidget]
+} -body {
+    # Das Rechteck gehoert dazu: wer ein Feld anklicken oder hervorheben
+    # will, braucht es -- und es zweimal zu holen waere ein zweiter Weg
+    # zu denselben Zahlen. Wie ueberall {links unten rechts oben}.
+    # Sieben Elemente seit 0.6.3:
+    # {typ name wert flags rechteck optionen erklaerung}.
+    # Optionen und Erklaerung sind bei den meisten Feldern leer -- aber
+    # DA: eine Rueckgabe, die je nach Feldart verschieden lang ist,
+    # zwingt jeden Aufrufer zu einer Fallunterscheidung.
+    set schlecht 0
+    foreach e [pdfium::formfields $d 0] {
+        if {[llength $e] != 7} { incr schlecht }
+        lassign [lindex $e 4] l u r t
+        if {[llength [lindex $e 4]] != 4} { incr schlecht ; continue }
+        if {$l >= $r || $u >= $t} { incr schlecht }
+    }
+    set schlecht
+} -cleanup {pdfium::close $d} -result 0
+
+
+test pdfiumtcl-2.45 {formfill fuellt ueber die Formularumgebung} \
+        -constraints haveFormPdf -setup {
+    set aus [file join [temporaryDirectory] ffill-[pid].pdf]
+    set d [pdfium::open [formularPdf]]
+} -body {
+    # NICHT ueber FPDFAnnot_SetStringValue: das schriebe /V und liesse
+    # die Erscheinung stehen -- genau die Luecke, die
+    # pdf4tcl::fillForms bis 0.9.4.64 hatte.
+    #
+    # Die Formularumgebung geht den Weg eines Betrachters: fokussieren,
+    # alles auswaehlen, ersetzen. PDFium baut den Appearance-Strom dabei
+    # SELBST neu.
+    #
+    # Der Beweis steht unten: nach "flatten OHNE -forms" muss der Wert
+    # im Seitentext stehen. Waere nur /V gesetzt, brennte flatten den
+    # alten (leeren) Strom ein und der Wert waere ganz weg.
+    set n [pdfium::formfill $d 0 [list name "Neuer Wert"]]
+    set gelesen [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+    pdfium::save $d $aus
+    pdfium::close $d
+
+    set e [pdfium::open $aus]
+    pdfium::flatten $e 0
+    set aus2 [file join [temporaryDirectory] ffill2-[pid].pdf]
+    pdfium::save $e $aus2
+    pdfium::close $e
+    set f [pdfium::open $aus2]
+    set text [pdfium::gettext $f 0]
+    pdfium::close $f
+    file delete $aus $aus2
+    list $n $gelesen [string match "*Neuer Wert*" $text]
+} -result {1 {Neuer Wert} 1}
+
+test pdfiumtcl-2.46 {ein Feld mit zwei Widgets wird mit EINEM Aufruf gefuellt} \
+        -constraints haveMultiWidget -setup {
+    set d [pdfium::open $::multiWidget]
+} -body {
+    # PDFium fuehrt Feld und Widgets von selbst zusammen -- der
+    # Durchschlagsatz braucht hier keine eigene Behandlung.
+    set n [pdfium::formfill $d 0 {kunde "Vreden"}]
+    set werte {}
+    foreach e [pdfium::formfields $d 0] { lappend werte [lindex $e 2] }
+    list $n $werte
+} -cleanup {pdfium::close $d} -result {1 {Vreden Vreden}}
+
+test pdfiumtcl-2.47 {ein unbekanntes Feld wird beim NAMEN genannt} \
+        -constraints haveFormPdf -setup {
+    set d [pdfium::open [formularPdf]]
+} -body {
+    # "3 von 5 gefuellt" laesst den Aufrufer suchen. Der Name sagt ihm,
+    # wo er nachsehen muss.
+    catch {pdfium::formfill $d 0 {gibtsnicht "x"}} e1
+    catch {pdfium::formfill $d 0 {name}} e2
+    list [string match "*gibtsnicht*" $e1] \
+         [string match "*must be a dictionary*" $e2]
+} -cleanup {pdfium::close $d} -result {1 1}
+
+
+set ::checkboxPdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-checkbox.pdf]
+testConstraint haveCheckboxPdf [file readable $::checkboxPdf]
+set ::dreiPdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-drei.pdf]
+testConstraint haveDreiPdf [file readable $::dreiPdf]
+
+test pdfiumtcl-2.48 {formfill kreuzt ein Kaestchen an} \
+        -constraints haveCheckboxPdf -setup {
+    set d [pdfium::open $::checkboxPdf]
+} -body {
+    # Ein Kaestchen nimmt keinen Text, sondern einen ZUSTAND -- also
+    # einen Wahrheitswert. Umgeschaltet wird mit einem KLICK in die
+    # Mitte des Feldes, denselben Weg geht ein Betrachter: PDFium fuehrt
+    # dabei /V, /AS und die Erscheinung zusammen nach. Wer /V allein
+    # setzte, haette das Kaestchen in der Datei angekreuzt und auf dem
+    # Papier leer -- gemessen: 0 dunkle Punkte vorher, 58 nachher, und
+    # sie bleiben nach dem Einbrennen.
+    #
+    # Die Vorlage liegt als FIXTURE dabei. Zur Laufzeit mit pdf4tcl
+    # erzeugt wuerde der Test unter "make test" uebersprungen, weil dort
+    # nur der Bauplatz im Pfad steht -- gemessen, 5 Skip statt 3.
+    set vorher [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+    pdfium::formfill $d 0 {haken 1}
+    set an [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+    # NOCHMAL 1 darf NICHT umschalten -- ein blinder Klick haette es
+    # wieder abgewaehlt, und "setze auf ja" haette das Gegenteil bewirkt.
+    pdfium::formfill $d 0 {haken 1}
+    set immernoch [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+    pdfium::formfill $d 0 {haken 0}
+    set aus [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+    list $vorher $an $immernoch $aus
+} -cleanup {pdfium::close $d} -result {Off Yes Yes Off}
+
+test pdfiumtcl-2.49 {ein Kaestchen nimmt keinen Text} \
+        -constraints haveCheckboxPdf -setup {
+    set d [pdfium::open $::checkboxPdf]
+} -body {
+    catch {pdfium::formfill $d 0 {haken "ja bitte"}} e
+    string match "*takes a boolean*" $e
+} -cleanup {pdfium::close $d} -result 1
+
+test pdfiumtcl-2.50 {der Haken wird auch GEZEICHNET} \
+        -constraints {haveCheckboxPdf haveTk} -body {
+    # Die Probe, die zaehlt. /V zu setzen ist leicht; dass es auf dem
+    # Papier ankommt, ist die Frage. Nach dem Einbrennen OHNE -forms
+    # muessen die Punkte bleiben -- waere nur /V gesetzt, brennte
+    # flatten den leeren Strom ein.
+    set voll [file join [temporaryDirectory] cbv-[pid].pdf]
+    set fest [file join [temporaryDirectory] cbf-[pid].pdf]
+    set d [pdfium::open $::checkboxPdf]
+    pdfium::render $d 0 -dpi 100 -forms 1 -imagename ::cbVor
+    pdfium::formfill $d 0 {haken 1}
+    pdfium::save $d $voll
+    pdfium::close $d
+    set e [pdfium::open $voll]
+    pdfium::flatten $e 0
+    pdfium::save $e $fest
+    pdfium::close $e
+    set f [pdfium::open $fest]
+    pdfium::render $f 0 -dpi 100 -imagename ::cbNach
+    pdfium::close $f
+    set n 0 ; set m 0
+    foreach {bildname var} {::cbVor n ::cbNach m} {
+        for {set y 0} {$y < [image height $bildname]} {incr y 2} {
+            foreach z [$bildname data -from 0 $y [image width $bildname] \
+                    [expr {$y+1}]] {
+                foreach px $z { if {$px ne "#ffffff"} { incr $var } }
+            }
+        }
+    }
+    image delete ::cbVor ::cbNach
+    file delete $voll $fest
+    expr {$m > $n}
+} -result 1
+
+
+set ::imagesPdf [file join [file dirname [file normalize [info script]]] \
+        fixtures images.pdf]
+testConstraint haveImagesPdf [file readable $::imagesPdf]
+
+test pdfiumtcl-2.51 {images nennt Bildpunkte und Aufloesung} \
+        -constraints haveImagesPdf -setup {
+    set d [pdfium::open $::imagesPdf]
+} -body {
+    # Beide Bilder sind auf dem Blatt GLEICH GROSS, aber verschieden
+    # fein: 600x400 und 60x40 Bildpunkte. Am Bildschirm sieht man das
+    # nicht, auf Papier sofort -- und dann ist das Blatt schon durch.
+    #
+    # Die dpi kommt VON PDFIUM, nicht aus einer eigenen Rechnung: es
+    # beruecksichtigt die Transformationsmatrix. Ein gedreht oder
+    # verzerrt eingesetztes Bild hat waagerecht und senkrecht
+    # verschiedene Werte, und "Breite durch Punkte" waere dann
+    # unauffaellig falsch.
+    set b [pdfium::images $d 0]
+    set breiten {} ; set fein {}
+    foreach e $b {
+        lappend breiten [dict get $e width]
+        lappend fein [expr {[dict get $e dpix] > 100 ? "fein" : "grob"}]
+    }
+    list [llength $b] [lsort -integer $breiten] [lsort -unique $fein]
+} -cleanup {pdfium::close $d} -result {2 {60 600} {fein grob}}
+
+test pdfiumtcl-2.52 {jedes Bild nennt Rechteck, Tiefe und MCID} \
+        -constraints haveImagesPdf -setup {
+    set d [pdfium::open $::imagesPdf]
+} -body {
+    set schlecht 0
+    foreach e [pdfium::images $d 0] {
+        foreach k {index box width height dpix dpiy bpp mcid} {
+            if {![dict exists $e $k]} { incr schlecht }
+        }
+        if {[llength [dict get $e box]] != 4} { incr schlecht }
+        # Ohne Auszeichnung ist die MCID -1 und nicht 0 -- 0 waere eine
+        # gueltige Marke, und die beiden zu verwechseln hiesse, ein
+        # unmarkiertes Bild dem ersten Strukturelement zuzuschlagen.
+        if {[dict get $e mcid] != -1} { incr schlecht }
+    }
+    set schlecht
+} -cleanup {pdfium::close $d} -result 0
+
+test pdfiumtcl-2.53 {eine Seite ohne Bilder gibt eine leere Liste} \
+        -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    # Leer heisst "keine", nicht "unbekannt" -- und ist kein Fehler.
+    # Ohne die Gegenprobe waere nicht gemessen, ob "images" ueberhaupt
+    # zwischen zwei Seiten unterscheidet.
+    llength [pdfium::images $d 0]
+} -cleanup {pdfium::close $d} -result 0
+
+
+# Die Mitte des ersten Textfeldes -- AUSGERECHNET und nicht
+# festgeschrieben.
+#
+# Der erste Anlauf klickte auf feste 100/497, uebernommen aus einer
+# anderen Datei. In der Fixture liegt dort nichts, der Klick ging ins
+# Leere, und der Test fiel mit einem leeren Wert. Wer Koordinaten aus
+# einer Datei in eine andere traegt, misst die falsche Datei.
+proc textfeldMitte {doc} {
+    foreach e [pdfium::formfields $doc 0] {
+        if {[lindex $e 0] ne "text"} continue
+        lassign [lindex $e 4] l u r o
+        return [list [expr {($l + $r) / 2.0}] [expr {($u + $o) / 2.0}]]
+    }
+    return {}
+}
+
+test pdfiumtcl-2.54 {editbegin: tippen, loeschen, festschreiben} \
+        -constraints haveFormPdf -body {
+    # EINE SITZUNG, weil Tippen ZUSTAND ist: Fokus, Schreibmarke, ein
+    # halb getipptes Feld. Alle anderen Befehle bauen die
+    # Formularumgebung je Aufruf auf und ab -- fuers Zeichnen richtig,
+    # hier nicht.
+    #
+    # TIPPEN FUEGT EIN, es ersetzt nicht -- wie an einer Tastatur. Der
+    # Klick setzt die Schreibmarke DORT, WO MAN HINKLICKT; hier in die
+    # Feldmitte, also hinter den vorhandenen Text "Muster GmbH".
+    #
+    # Bis die Mausbewegung vor dem Klick dazukam, landete die Marke
+    # immer am ANFANG, und das Ergebnis war "VredenMuster GmbH". Dass
+    # der Test sich mit der Behebung geaendert hat, ist die gute
+    # Nachricht: vorher wusste PDFium nicht, wohin geklickt wurde.
+    #
+    # Wer ersetzen will, nimmt "formfill" -- das waehlt vorher alles aus.
+    # Zwei Wege, zwei Namen.
+    set d [pdfium::open [formularPdf]]
+    lassign [textfeldMitte $d] mx my
+    set s [pdfium::editbegin $d 0]
+    set leer [pdfium::editclick $s 2 2]
+    set treffer [pdfium::editclick $s $mx $my]
+    pdfium::editchar $s "Vredenn"
+    pdfium::editkey $s back
+    pdfium::editend $s
+    set wert ""
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 0] eq "text"} { set wert [lindex $e 2] }
+    }
+    pdfium::close $d
+    list $leer $treffer $wert
+} -result {0 1 {Muster GmbHVreden}}
+
+test pdfiumtcl-2.55 {die Ruecktaste geht ueber OnChar, nicht OnKeyDown} \
+        -constraints haveFormPdf -body {
+    # GEMESSEN, nicht angenommen: "abc" tippen und FORM_OnKeyDown mit
+    # FWL_VKEY_Back liess "abc" stehen. PDFium behandelt den
+    # Rueckschritt als ZEICHEN, so wie er aus einer Tastatur kommt; die
+    # Pfeiltasten dagegen ueber OnKeyDown.
+    #
+    # Ohne diesen Test waere "back" eine Taste, die es gibt und die
+    # nichts tut -- und der Aufrufer haette den Fehler bei sich gesucht.
+    set d [pdfium::open [formularPdf]]
+    lassign [textfeldMitte $d] mx my
+    set s [pdfium::editbegin $d 0]
+    pdfium::editclick $s $mx $my
+    pdfium::editchar $s "abc"
+    pdfium::editkey $s back
+    pdfium::editend $s
+    set wert ""
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 0] eq "text"} { set wert [lindex $e 2] }
+    }
+    pdfium::close $d
+    # Die Vorlage traegt "Muster GmbH"; angehaengt wird dahinter, weil
+    # der Klick in die Feldmitte ging.
+    string range $wert end-1 end
+} -result ab
+
+test pdfiumtcl-2.56 {editkey nennt die Tasten, die es kennt} \
+        -constraints haveFormPdf -body {
+    set d [pdfium::open [formularPdf]]
+    set s [pdfium::editbegin $d 0]
+    catch {pdfium::editkey $s bogus} e
+    pdfium::editend $s
+    pdfium::close $d
+    string match "*must be tab, back, del, up, down, left, right, home or end*" $e
+} -result 1
+
+
+test pdfiumtcl-2.57 {tab springt ins naechste Feld} \
+        -constraints haveDreiPdf -body {
+    # So bedient man ein Formular: hineinklicken, schreiben, Tab. Ohne
+    # das muesste man jedes Feld einzeln treffen -- bei einem
+    # Frachtbrief mit zwanzig Kaesten ist das der Unterschied zwischen
+    # benutzbar und nicht.
+    set d [pdfium::open $::dreiPdf]
+    set s [pdfium::editbegin $d 0]
+    lassign [lindex [lindex [pdfium::formfields $d 0] 0] 4] l u r o
+    pdfium::editclick $s [expr {($l + $r) / 2.0}] [expr {($u + $o) / 2.0}]
+    pdfium::editchar $s "A"
+    pdfium::editkey $s tab
+    pdfium::editchar $s "B"
+    pdfium::editkey $s tab
+    pdfium::editchar $s "C"
+    pdfium::editend $s
+    set werte {}
+    foreach e [pdfium::formfields $d 0] { lappend werte [lindex $e 2] }
+    pdfium::close $d
+    set werte
+} -result {A B C}
+
+
+test pdfiumtcl-2.58 {editrender zeigt, was gerade getippt wird} \
+        -constraints {haveFormPdf haveTk} -body {
+    # "render -forms 1" baut sich eine EIGENE Formularumgebung auf und
+    # kennt den Sitzungszustand nicht -- also auch nicht, was getippt
+    # und noch nicht festgeschrieben ist.
+    #
+    # Gemessen: waehrend einer Sitzung drei Zeichen getippt, das Bild
+    # blieb bei 1406 dunklen Punkten; erst nach editend 1503. Man tippte
+    # BLIND, und wer nicht sieht, was er schreibt, kann es nicht
+    # berichtigen.
+    set d [pdfium::open [formularPdf]]
+    lassign [textfeldMitte $d] mx my
+    set s [pdfium::editbegin $d 0]
+    pdfium::editrender $s -dpi 100 -imagename ::erVor
+    pdfium::editclick $s $mx $my
+    pdfium::editchar $s "XYZ"
+    pdfium::editrender $s -dpi 100 -imagename ::erNach
+    pdfium::editend $s
+    pdfium::close $d
+    set n 0 ; set m 0
+    foreach {bild var} {::erVor n ::erNach m} {
+        for {set y 0} {$y < [image height $bild]} {incr y 2} {
+            foreach z [$bild data -from 0 $y [image width $bild] \
+                    [expr {$y+1}]] {
+                foreach px $z { if {$px ne "#ffffff"} { incr $var } }
+            }
+        }
+    }
+    image delete ::erVor ::erNach
+    expr {$m > $n}
+} -result 1
+
+test pdfiumtcl-2.59 {editrender nennt die Optionen, die es kennt} \
+        -constraints {haveFormPdf haveTk} -body {
+    set d [pdfium::open [formularPdf]]
+    set s [pdfium::editbegin $d 0]
+    catch {pdfium::editrender $s -bogus 1} e
+    catch {pdfium::editrender $s -dpi 0} e2
+    pdfium::editend $s
+    pdfium::close $d
+    list [string match "*must be -dpi or -imagename*" $e] \
+         [string match "*must be positive*" $e2]
+} -result {1 1}
+
+
+set ::gruppePdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-gruppe.pdf]
+testConstraint haveGruppePdf [file readable $::gruppePdf]
+
+test pdfiumtcl-2.60 {in EINER Sitzung laesst sich die Option wechseln} \
+        -constraints haveGruppePdf -body {
+    # Eine Gruppe von drei Optionsfeldern teilt sich EINEN Namen, jedes
+    # Widget hat seinen eigenen Wert (/normal, /express, /overnight).
+    #
+    # Bis hierher wirkte nur der ERSTE Klick: danach blieb der Fokus am
+    # ersten Widget haengen, und weitere Klicks gingen ins Leere. In
+    # GETRENNTEN Sitzungen ging jede Option -- das war der Hinweis, dass
+    # es am Sitzungszustand liegt und nicht an der Datei.
+    #
+    # Es fehlte die MAUSBEWEGUNG vor dem Klick. Ein Betrachter schickt
+    # sie, und PDFium merkt sich daran, ueber welchem Widget der Zeiger
+    # steht.
+    #
+    # Gemeldet am 06.09.2026 an pdf4tcls demo-forms.pdf.
+    set d [pdfium::open $::gruppePdf]
+    set s [pdfium::editbegin $d 0]
+    set folge {}
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 0] ne "radiobutton"} continue
+        lassign [lindex $e 4] l u r o
+        pdfium::editclick $s [expr {($l + $r) / 2.0}] [expr {($u + $o) / 2.0}]
+        foreach x [pdfium::formfields $d 0] {
+            if {[lindex $x 0] eq "radiobutton"} {
+                lappend folge [lindex $x 2]
+                break
+            }
+        }
+    }
+    pdfium::editend $s
+    pdfium::close $d
+    set folge
+} -result {normal express overnight}
+
+test pdfiumtcl-2.61 {ein Kaestchen schaltet wiederholt um} \
+        -constraints haveGruppePdf -body {
+    # Derselbe Fehler traf das Ankreuzfeld: einmal an, dann nichts mehr.
+    set d [pdfium::open $::gruppePdf]
+    set s [pdfium::editbegin $d 0]
+    set folge {}
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 1] ne "f_agb"} continue
+        lassign [lindex $e 4] l u r o
+        foreach n {1 2 3} {
+            pdfium::editclick $s [expr {($l + $r) / 2.0}] \
+                    [expr {($u + $o) / 2.0}]
+            foreach x [pdfium::formfields $d 0] {
+                if {[lindex $x 1] eq "f_agb"} {
+                    lappend folge [lindex $x 2]
+                    break
+                }
+            }
+        }
+    }
+    pdfium::editend $s
+    pdfium::close $d
+    set folge
+} -result {Yes Off Yes}
+
+
+test pdfiumtcl-2.62 {formfields nennt die Werte eines Auswahlfeldes} \
+        -constraints haveGruppePdf -setup {
+    set d [pdfium::open $::gruppePdf]
+} -body {
+    # Bis hierher meldete formfields "combobox" und verschwieg, WELCHE
+    # Werte gehen. Wer eines fuellen wollte, musste raten -- eine
+    # Auskunft, die halb ist, ist schlechter als eine, die fehlt: man
+    # haelt sie fuer vollstaendig.
+    #
+    # Je Eintrag {index label gewaehlt}. Der Index gehoert dazu, weil
+    # zwei Eintraege dieselbe Beschriftung tragen duerfen.
+    set opts {}
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 0] eq "combobox"} { set opts [lindex $e 5] }
+    }
+    list [llength $opts] [lindex [lindex $opts 1] 1]
+} -cleanup {pdfium::close $d} -result {4 {Artikel B}}
+
+test pdfiumtcl-2.63 {bei anderen Feldarten bleibt die Liste leer} \
+        -constraints haveGruppePdf -setup {
+    set d [pdfium::open $::gruppePdf]
+} -body {
+    # LEER und nicht weg: eine Rueckgabe, die je nach Feldart
+    # verschieden lang ist, zwingt jeden Aufrufer zu einer
+    # Fallunterscheidung.
+    set laengen {}
+    foreach e [pdfium::formfields $d 0] { lappend laengen [llength $e] }
+    lsort -unique $laengen
+} -cleanup {pdfium::close $d} -result 7
+
+test pdfiumtcl-2.64 {ein Auswahlfeld wird ueber die Beschriftung gewaehlt} \
+        -constraints haveGruppePdf -body {
+    # Ein Kombinationsfeld ohne Bearbeitungsflagge laesst sich nicht
+    # BESCHREIBEN, nur waehlen. Gewaehlt wird mit den Pfeiltasten, so
+    # wie ein Betrachter es tut: nach ganz oben, dann so oft nach unten,
+    # wie der Eintrag entfernt ist.
+    #
+    # DER VERSATZ, der dabei auffiel: nach dem Hochlaufen ist NICHTS
+    # gewaehlt, nicht der erste Eintrag. Mit "ziel" Schritten landete
+    # "Artikel C" auf "Artikel B". Die Annahme "oben = Eintrag 0" war
+    # falsch, und ohne die Messung mit DREI verschiedenen Werten waere
+    # sie nicht aufgefallen -- mit nur einem haette man den Versatz fuer
+    # richtig gehalten.
+    set treffer {}
+    foreach wunsch {{Artikel A} {Artikel C} Sonderbestellung} {
+        set d [pdfium::open $::gruppePdf]
+        pdfium::formfill $d 0 [list f_artikel $wunsch]
+        foreach x [pdfium::formfields $d 0] {
+            if {[lindex $x 1] eq "f_artikel"} { lappend treffer [lindex $x 2] }
+        }
+        pdfium::close $d
+    }
+    set treffer
+} -result {{Artikel A} {Artikel C} Sonderbestellung}
+
+test pdfiumtcl-2.65 {ein unbekannter Wert wird mit den erlaubten gemeldet} \
+        -constraints haveGruppePdf -setup {
+    set d [pdfium::open $::gruppePdf]
+} -body {
+    # Bei einem Kombinationsfeld OHNE Bearbeitungsflagge tut
+    # ReplaceSelection nichts: dort kann man nur waehlen, nicht
+    # schreiben. formfill meldete trotzdem "1 gefuellt", und der Wert
+    # blieb leer -- ein stiller Falscherfolg, bei dem der Aufrufer die
+    # Datei fuer fertig haelt.
+    #
+    # Jetzt wird nachgelesen und, wenn nichts ankam, werden die
+    # erlaubten Werte GENANNT. Die haben wir seit dieser Fassung, also
+    # kostet die gute Meldung nichts extra.
+    # Die erlaubten Werte GEHOEREN in die Meldung: der Aufrufer soll
+    # nicht nachschlagen muessen, was er haette schreiben sollen.
+    catch {pdfium::formfill $d 0 {f_artikel "Gibt es nicht"}} e
+    list [string match "*no such option*" $e] \
+         [string match "*Artikel B*" $e]
+} -cleanup {pdfium::close $d} -result {1 1}
+
+
+set ::tooltipPdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-tooltip.pdf]
+testConstraint haveTooltipPdf [file readable $::tooltipPdf]
+
+test pdfiumtcl-2.66 {formfields nennt den Namen fuer Menschen} \
+        -constraints haveTooltipPdf -setup {
+    set d [pdfium::open $::tooltipPdf]
+} -body {
+    # /TU -- was ein Betrachter als Erklaerung anzeigt. In einer
+    # Feldliste steht damit "Empfaenger, Name und Anschrift" statt
+    # "f_kunde_2"; bei einem fremden Frachtbrief der Unterschied
+    # zwischen bedienbar und Raetselraten.
+    #
+    # LEER, wenn die Datei keinen traegt -- und NICHT etwa der
+    # technische Name noch einmal. Eine Verdopplung sieht aus wie eine
+    # Erklaerung und ist keine.
+    set l {}
+    foreach e [pdfium::formfields $d 0] {
+        lappend l [list [lindex $e 1] [lindex $e 6]]
+    }
+    set l
+} -cleanup {pdfium::close $d} \
+  -result {{f_kunde_2 {Empfaenger, Name und Anschrift}} {f_ohne {}}}
+
+test pdfiumtcl-2.67 {der Eintrag hat jetzt sieben Elemente} \
+        -constraints haveTooltipPdf -setup {
+    set d [pdfium::open $::tooltipPdf]
+} -body {
+    # {typ name wert flags rechteck optionen erklaerung}. Die Rueckgabe
+    # ist eine Zusage; sie waechst nur mit einem Test, der es meldet.
+    set laengen {}
+    foreach e [pdfium::formfields $d 0] { lappend laengen [llength $e] }
+    lsort -unique $laengen
+} -cleanup {pdfium::close $d} -result 7
+
+
+test pdfiumtcl-2.68 {pageobjects -fonts nennt Schrift und Groesse} \
+        -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    # Beim Nachbauen eines fremden Vordrucks die entscheidende
+    # Auskunft. Und fuer readorder/overlaps eine bessere Grundlage als
+    # das blosse Rechteck: eine 6-Punkt-Zeile und eine Ueberschrift
+    # sehen als Rechteck gleich aus.
+    set gefunden {}
+    foreach e [pdfium::pageobjects $d 0 -fonts 1] {
+        if {[lindex $e 1] ne "text"} continue
+        lassign [lindex $e 3] nm gr emb fl
+        set gefunden [list [expr {$nm ne ""}] [expr {$gr > 0}]]
+        break
+    }
+    set gefunden
+} -cleanup {pdfium::close $d} -result {1 1}
+
+test pdfiumtcl-2.69 {eingebettet oder nicht -- die Frage der Portabilitaet} \
+        -constraints {havePdf haveTagged} -body {
+    # Eine nicht eingebettete Schrift sieht auf einer anderen Maschine
+    # anders aus, und das faellt erst DORT auf. Ohne die Gegenprobe an
+    # ZWEI Dateien waere nicht gemessen, ob das Merkmal ueberhaupt
+    # unterscheidet -- eine Auskunft, die immer dasselbe sagt, ist
+    # keine.
+    proc ersteSchrift {f} {
+        set d [pdfium::open $f]
+        set r {}
+        foreach e [pdfium::pageobjects $d 0 -fonts 1] {
+            if {[lindex $e 1] ne "text"} continue
+            set r [lindex $e 3]
+            break
+        }
+        pdfium::close $d
+        return $r
+    }
+    list [lindex [ersteSchrift $::sample] 2] \
+         [lindex [ersteSchrift $::tagged] 2]
+} -result {0 1}
+
+test pdfiumtcl-2.70 {ohne die Optionen bleibt es ein Tripel} \
+        -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    # Rueckwaertsvertraeglich: wer die Schriften nicht anfordert,
+    # bekommt genau das, was er vorher bekam. Und -marks und -fonts
+    # zusammen ergeben fuenf, in dieser Reihenfolge.
+    list [llength [lindex [pdfium::pageobjects $d 0] 0]] \
+         [llength [lindex [pdfium::pageobjects $d 0 -fonts 1] 0]] \
+         [llength [lindex [pdfium::pageobjects $d 0 -fonts 1 -marks 1] 0]]
+} -cleanup {pdfium::close $d} -result {3 4 5}
+
+test pdfiumtcl-2.71 {pageobjects nennt die Optionen, die es kennt} \
+        -constraints havePdf -setup {
+    set d [pdfium::open $::sample]
+} -body {
+    catch {pdfium::pageobjects $d 0 -bogus 1} e
+    string match "*must be -marks or -fonts*" $e
+} -cleanup {pdfium::close $d} -result 1
+
+
+set ::listboxPdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-listbox.pdf]
+testConstraint haveListboxPdf [file readable $::listboxPdf]
+
+test pdfiumtcl-2.72 {ein Listenfeld laesst sich waehlen} \
+        -constraints haveListboxPdf -body {
+    # Der Zweig dafuer stand schon im Code -- die Typwache davor liess
+    # ihn nur nie erreichen. Toter Code, beim Einbauen der Auswahl
+    # selbst hinterlassen und aus einer Durchsicht gemeldet.
+    #
+    # ER HAETTE AUCH FUNKTIONIERT: von Hand ueber die Sitzung gemessen,
+    # dreimal "down" waehlte "Vreden". Ein toter Zweig, der stimmt, ist
+    # trotzdem tot.
+    set treffer {}
+    foreach wunsch {Bremen Vreden} {
+        set d [pdfium::open $::listboxPdf]
+        pdfium::formfill $d 0 [list ort $wunsch]
+        lappend treffer [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+        pdfium::close $d
+    }
+    set treffer
+} -result {Bremen Vreden}
+
+test pdfiumtcl-2.73 {Listenfeld und Kombinationsfeld zaehlen VERSCHIEDEN} \
+        -constraints {haveListboxPdf haveGruppePdf} -body {
+    # DER UNTERSCHIED, an dem ich zweimal gestolpert bin.
+    #
+    # Nach dem Hochlaufen ist beim KOMBINATIONSFELD nichts gewaehlt --
+    # der erste "down" waehlt erst den ersten Eintrag. Beim LISTENFELD
+    # steht die Auswahl dann schon auf dem ersten.
+    #
+    # Mit einer festen Regel landete erst "Artikel C" auf "Artikel B",
+    # spaeter "Bremen" auf "Hamburg": zweimal dieselbe Annahme, zweimal
+    # falsch. Jetzt fragt der Code mit IsOptionSelected nach, statt zu
+    # rechnen.
+    #
+    # Dieser Test prueft BEIDE Arten mit dem ERSTEN Eintrag -- daran
+    # faellt ein Versatz um eins auf, an einem spaeten Eintrag nicht
+    # unbedingt: dort klemmt die Auswahl am Ende und sieht richtig aus.
+    set d1 [pdfium::open $::listboxPdf]
+    pdfium::formfill $d1 0 {ort Bremen}
+    set a [lindex [lindex [pdfium::formfields $d1 0] 0] 2]
+    pdfium::close $d1
+
+    set d2 [pdfium::open $::gruppePdf]
+    pdfium::formfill $d2 0 {f_artikel "Artikel A"}
+    set b ""
+    foreach e [pdfium::formfields $d2 0] {
+        if {[lindex $e 1] eq "f_artikel"} { set b [lindex $e 2] }
+    }
+    pdfium::close $d2
+    list $a $b
+} -result {Bremen {Artikel A}}
+
+
 # ---------------------------------------------------------------------------
 # pdfiumtcl-3.x  mctext: MCID -> Text
 #
@@ -542,7 +1492,7 @@ test pdfiumtcl-2.27 {flatten -forms rettet einen mit fillForms gesetzten Wert} \
 # the tree, and no validator checks this.
 # ---------------------------------------------------------------------------
 
-test pdfiumtcl-3.1 {mctext returns pairs} -constraints havePdf -setup {
+test pdfiumtcl-3.1a {mctext returns pairs} -constraints havePdf -setup {
     set d [pdfium::open $::sample]
 } -body {
     set mc [pdfium::mctext $d 0]

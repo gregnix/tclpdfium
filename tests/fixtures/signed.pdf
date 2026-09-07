@@ -1,0 +1,134 @@
+%PDF-1.7
+%¿÷¢þ
+%QDF-1.0
+
+%% Original object ID: 1 0
+1 0 obj
+<<
+  /AcroForm <<
+    /Fields [
+      2 0 R
+    ]
+    /SigFlags 3
+  >>
+  /Pages 3 0 R
+  /Type /Catalog
+>>
+endobj
+
+%% Original object ID: 7 0
+2 0 obj
+<<
+  /F 132
+  /FT /Sig
+  /P 4 0 R
+  /Rect [
+    50
+    600
+    300
+    660
+  ]
+  /Subtype /Widget
+  /T (Signatur1)
+  /Type /Annot
+  /V 5 0 R
+>>
+endobj
+
+%% Original object ID: 2 0
+3 0 obj
+<<
+  /Count 1
+  /Kids [
+    4 0 R
+  ]
+  /Type /Pages
+>>
+endobj
+
+%% Page 1
+%% Original object ID: 3 0
+4 0 obj
+<<
+  /Annots [
+    2 0 R
+  ]
+  /Contents 6 0 R
+  /MediaBox [
+    0
+    0
+    595
+    842
+  ]
+  /Parent 3 0 R
+  /Resources <<
+    /Font <<
+      /F1 8 0 R
+    >>
+  >>
+  /Type /Page
+>>
+endobj
+
+%% Original object ID: 6 0
+5 0 obj
+<<
+  /ByteRange [
+    0
+    840
+    1704
+    1000
+  ]
+  /Contents <00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000>
+  /Filter /Adobe.PPKLite
+  /M (D:20260906120000+02'00')
+  /Name (Gregor)
+  /Reason (Pruefung der Lesefunktion)
+  /SubFilter /adbe.pkcs7.detached
+  /Type /Sig
+>>
+endobj
+
+%% Contents for page 1
+%% Original object ID: 4 0
+6 0 obj
+<<
+  /Length 7 0 R
+>>
+stream
+BT /F1 12 Tf 50 700 Td (Unterschriebenes Blatt) Tj ET
+endstream
+endobj
+
+7 0 obj
+54
+endobj
+
+%% Original object ID: 5 0
+8 0 obj
+<<
+  /BaseFont /Helvetica
+  /Subtype /Type1
+  /Type /Font
+>>
+endobj
+
+xref
+0 9
+0000000000 65535 f 
+0000000052 00000 n 
+0000000201 00000 n 
+0000000388 00000 n 
+0000000497 00000 n 
+0000000723 00000 n 
+0000001147 00000 n 
+0000001256 00000 n 
+0000001302 00000 n 
+trailer <<
+  /Root 1 0 R
+  /Size 9
+  /ID [<5045867d4606773929c2af52ac13d86e><5045867d4606773929c2af52ac13d86e>]
+>>
+startxref
+1379
+%%EOF

@@ -52,6 +52,10 @@
 #include <fpdf_structtree.h>
 #include <fpdf_flatten.h>
 #include <fpdf_formfill.h>
+#include <fpdf_catalog.h>
+#include <fpdf_attachment.h>
+#include <fpdf_signature.h>
+#include <fpdf_fwlevent.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -762,6 +766,1340 @@ PdfiumRotationCmd(ClientData cd, Tcl_Interp *interp,
 
 
 
+
+
+
+
+
+/* Eine Tcl-Zeichenkette als UTF-16LE, mit Abschluss. Der Aufrufer gibt
+ * den DString frei. */
+static const unsigned short *
+_ToUtf16(Tcl_Obj *obj, Tcl_DString *ds)
+{
+    Tcl_DStringInit(ds);
+    Tcl_Encoding tenc = Tcl_GetEncoding(NULL, "utf-16le");
+    if (!tenc) tenc = Tcl_GetEncoding(NULL, "unicode");
+    if (tenc) {
+        Tcl_UtfToExternalDString(tenc, Tcl_GetString(obj), -1, ds);
+        Tcl_FreeEncoding(tenc);
+    }
+    { char _z[2] = {0,0}; Tcl_DStringAppend(ds, _z, 2); }
+    return (const unsigned short *)Tcl_DStringValue(ds);
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Eine SITZUNG zum Tippen                                             */
+/*                                                                     */
+/*   set s [pdfium::editbegin $doc $seite]                             */
+/*   pdfium::editclick  $s $x $y      Seitenkoordinaten, Punkt         */
+/*   pdfium::editchar   $s "M"        ein Zeichen                      */
+/*   pdfium::editkey    $s back       back|del|left|right|home|end     */
+/*   pdfium::editrender $s -dpi 100 -imagename ::bild                  */
+/*   pdfium::editend    $s                                             */
+/*                                                                     */
+/* WARUM EINE SITZUNG: alle anderen Befehle bauen die Formularumgebung  */
+/* je Aufruf auf und wieder ab. Fuers Zeichnen ist das richtig, nur     */
+/* verschwenderisch. Beim TIPPEN nicht: Fokus, Schreibmarke und ein     */
+/* halb getipptes Feld sind ZUSTAND, und der ist nach jedem Aufruf weg. */
+/*                                                                     */
+/* Die Sitzung haelt Umgebung UND Seite offen, solange getippt wird.    */
+/* Die Lebensdauer steht damit im Aufrufer und nicht in einer stillen   */
+/* Annahme -- wer "editbegin" ruft, sieht, dass er "editend" schuldet.  */
+/*                                                                     */
+/* GENAU EINE SEITE je Sitzung. Ueber Seiten hinweg zu tippen hiesse,   */
+/* mehrere Seiten offenzuhalten und den Fokus zwischen ihnen zu         */
+/* verwalten -- das waere eine zweite Sache unter demselben Namen.      */
+/* ------------------------------------------------------------------ */
+typedef struct PdfiumEdit {
+    FPDF_DOCUMENT       doc;
+    FPDF_PAGE           page;
+    FPDF_FORMHANDLE     form;
+    FPDF_FORMFILLINFO  *ffi;   /* lebt so lange wie die Umgebung */
+    int                 pagenum;
+} PdfiumEdit;
+
+static int
+PdfiumEditBeginCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    FPDF_FORMFILLINFO *ffi =
+        (FPDF_FORMFILLINFO *)ckalloc(sizeof(FPDF_FORMFILLINFO));
+    memset(ffi, 0, sizeof(*ffi));
+    ffi->version = 1;
+    /* Die Struktur muss die Sitzung ueberleben: PDFium haelt einen Zeiger
+     * darauf. Eine lokale Variable waere nach editbegin weg, und der
+     * naechste Tastendruck liefe in den Speicher, der ihr mal gehoerte --
+     * ein Fehler, der lange gutgeht und dann nicht. */
+    FPDF_FORMHANDLE form = FPDFDOC_InitFormFillEnvironment(doc, ffi);
+    if (!form) {
+        ckfree((char *)ffi);
+        FPDF_ClosePage(page);
+        PDFIUM_ERROR(interp, "cannot init form environment");
+    }
+    FORM_OnAfterLoadPage(page, form);
+
+    PdfiumEdit *e = (PdfiumEdit *)ckalloc(sizeof(PdfiumEdit));
+    e->doc = doc; e->page = page; e->form = form; e->ffi = ffi;
+    e->pagenum = pagenum;
+    Tcl_SetObjResult(interp, Tcl_NewWideIntObj((Tcl_WideInt)(intptr_t)e));
+    return TCL_OK;
+}
+
+static PdfiumEdit *
+_EditFromObj(Tcl_Interp *interp, Tcl_Obj *obj)
+{
+    Tcl_WideInt w;
+    if (Tcl_GetWideIntFromObj(interp, obj, &w) != TCL_OK) return NULL;
+    return (PdfiumEdit *)(intptr_t)w;
+}
+
+static int
+PdfiumEditClickCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session page-x page-y");
+        return TCL_ERROR;
+    }
+    PdfiumEdit *e = _EditFromObj(interp, objv[1]);
+    if (!e) return TCL_ERROR;
+    double x, y;
+    if (Tcl_GetDoubleFromObj(interp, objv[2], &x) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetDoubleFromObj(interp, objv[3], &y) != TCL_OK) return TCL_ERROR;
+
+    /* Erst fragen, ob dort ueberhaupt ein Feld liegt. Ein Klick ins
+     * Leere nimmt sonst still den Fokus weg, und der naechste
+     * Tastendruck verschwindet -- was aussieht, als haette die Tastatur
+     * nicht funktioniert. */
+    int hat = FPDFPage_HasFormFieldAtPoint(e->form, e->page, x, y);
+    if (hat < 0) hat = 0;
+    if (hat) {
+        /* Erst die Maus BEWEGEN, dann druecken.
+         *
+         * Ein Betrachter schickt vor jedem Klick Bewegungen, und PDFium
+         * merkt sich daran, ueber welchem Widget der Zeiger steht.
+         * Ohne das blieb der Fokus nach dem ersten Klick am ersten
+         * Widget haengen: in einer Gruppe von drei Optionsfeldern
+         * wirkte nur der erste Klick, die naechsten gingen ins Leere.
+         *
+         * Gemeldet am 06.09.2026 an pdf4tcls demo-forms.pdf. In
+         * GETRENNTEN Sitzungen ging jede Option -- das war der Hinweis,
+         * dass es am Sitzungszustand liegt und nicht an der Datei.
+         */
+        FORM_OnMouseMove(e->form, e->page, 0, x, y);
+        FORM_OnLButtonDown(e->form, e->page, 0, x, y);
+        FORM_OnLButtonUp(e->form, e->page, 0, x, y);
+    }
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(hat ? 1 : 0));
+    return TCL_OK;
+}
+
+static int
+PdfiumEditCharCmd(ClientData cd, Tcl_Interp *interp,
+                  int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session text");
+        return TCL_ERROR;
+    }
+    PdfiumEdit *e = _EditFromObj(interp, objv[1]);
+    if (!e) return TCL_ERROR;
+
+    /* Zeichenweise, nicht als Zeichenkette: FORM_OnChar nimmt EIN
+     * Zeichen, so wie eine Tastatur es liefert. Wer eine ganze Zeile
+     * einsetzen will, nimmt formfill -- das ist der andere Weg und
+     * heisst auch anders. */
+    Tcl_Size len;
+    const char *utf8 = Tcl_GetStringFromObj(objv[2], &len);
+    int n = 0;
+    const char *p2 = utf8;
+    while (p2 < utf8 + len) {
+        /* Tcl_UniChar, NICHT int: unter 8.6 ist der Typ "unsigned
+         * short", unter 9.0 "int". Ein festgeschriebenes int liess sich
+         * mit 9.0 uebersetzen und mit 8.6 nicht -- gemeldet aus einem
+         * Bau gegen tcl8.6, und der Fehler war beim Bauen sichtbar und
+         * nicht erst beim Laufen. Immerhin.
+         *
+         * Folge unter 8.6: Zeichen jenseits der Basic Multilingual Plane
+         * kommen als Ersatzpaar an, also in zwei Schritten. Fuer
+         * Formularfelder ist das ohne Belang; wer Schriftzeichen
+         * jenseits von U+FFFF eintippt, hat andere Sorgen. */
+        Tcl_UniChar ch;
+        p2 += Tcl_UtfToUniChar(p2, &ch);
+        FORM_OnChar(e->form, e->page, (int)ch, 0);
+        n++;
+    }
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(n));
+    return TCL_OK;
+}
+
+static int
+PdfiumEditKeyCmd(ClientData cd, Tcl_Interp *interp,
+                 int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv,
+                "session back|del|left|right|home|end");
+        return TCL_ERROR;
+    }
+    PdfiumEdit *e = _EditFromObj(interp, objv[1]);
+    if (!e) return TCL_ERROR;
+    const char *k = Tcl_GetString(objv[2]);
+
+    /* RUECKTASTE UEBER OnChar, nicht ueber OnKeyDown.
+     *
+     * Gemessen: "abc" tippen, dann FORM_OnKeyDown mit FWL_VKEY_Back --
+     * es blieb "abc". Mit FORM_OnChar und 0x08 wird "ab" daraus.
+     * PDFium behandelt den Rueckschritt als ZEICHEN, so wie es aus einer
+     * Tastatur kommt; die Pfeiltasten dagegen ueber OnKeyDown.
+     *
+     * Ohne die Messung waere hier eine Taste, die es gibt und die nichts
+     * tut -- und der Aufrufer haette den Fehler bei sich gesucht.
+     */
+    if (strcmp(k, "back") == 0) {
+        FORM_OnChar(e->form, e->page, 0x08, 0);
+        return TCL_OK;
+    }
+
+    int code;
+    if      (strcmp(k, "tab")   == 0) code = FWL_VKEY_Tab;
+    else if (strcmp(k, "del")   == 0) code = FWL_VKEY_Delete;
+    else if (strcmp(k, "up")    == 0) code = FWL_VKEY_Up;
+    else if (strcmp(k, "down")  == 0) code = FWL_VKEY_Down;
+    else if (strcmp(k, "left")  == 0) code = FWL_VKEY_Left;
+    else if (strcmp(k, "right") == 0) code = FWL_VKEY_Right;
+    else if (strcmp(k, "home")  == 0) code = FWL_VKEY_Home;
+    else if (strcmp(k, "end")   == 0) code = FWL_VKEY_End;
+    else {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+            "unknown key \"%s\": must be tab, back, del, up, down, left,"
+            " right, home or end", k));
+        return TCL_ERROR;
+    }
+    FORM_OnKeyDown(e->form, e->page, code, 0);
+    FORM_OnKeyUp(e->form, e->page, code, 0);
+    return TCL_OK;
+}
+
+static int
+PdfiumEditEndCmd(ClientData cd, Tcl_Interp *interp,
+                 int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session");
+        return TCL_ERROR;
+    }
+    PdfiumEdit *e = _EditFromObj(interp, objv[1]);
+    if (!e) return TCL_ERROR;
+    /* Den Fokus VOR dem Schliessen abgeben: PDFium schreibt den Inhalt
+     * des Feldes beim Fokusverlust fest. Ohne das ginge das zuletzt
+     * getippte Feld verloren -- und zwar genau das, an dem man gerade
+     * gearbeitet hat. */
+    FORM_ForceToKillFocus(e->form);
+    FORM_OnBeforeClosePage(e->page, e->form);
+    FPDFDOC_ExitFormFillEnvironment(e->form);
+    FPDF_ClosePage(e->page);
+    /* Erst NACH ExitFormFillEnvironment: PDFium haelt bis dahin einen
+     * Zeiger auf die Struktur. */
+    ckfree((char *)e->ffi);
+    ckfree((char *)e);
+    return TCL_OK;
+}
+
+
+/* ------------------------------------------------------------------ */
+/* pdfium::editrender session ?-dpi n? ?-imagename name?               */
+/*                                                                     */
+/* Die Seite einer Sitzung zeichnen -- MIT deren Formularumgebung.      */
+/*                                                                     */
+/* WARUM EIGENS: "render -forms 1" baut sich seine EIGENE Umgebung auf. */
+/* Die kennt den Sitzungszustand nicht, also auch nicht, was gerade     */
+/* getippt und noch nicht festgeschrieben ist. Gemessen: waehrend einer */
+/* Sitzung drei Zeichen getippt, das Bild blieb bei 1406 dunklen        */
+/* Punkten; erst nach "editend" waren es 1503.                          */
+/*                                                                     */
+/* Man tippte also BLIND. Das ist kein Schoenheitsfehler -- wer nicht   */
+/* sieht, was er schreibt, kann es auch nicht berichtigen.              */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumEditRenderCmd(ClientData cd, Tcl_Interp *interp,
+                    int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc < 2 || (objc % 2) != 0) {
+        Tcl_WrongNumArgs(interp, 1, objv,
+                "session ?-dpi n? ?-imagename name?");
+        return TCL_ERROR;
+    }
+    PdfiumEdit *e = _EditFromObj(interp, objv[1]);
+    if (!e) return TCL_ERROR;
+
+    double dpi = 150.0;
+    const char *imgname = "pdfpage";
+    for (int i = 2; i < objc; i += 2) {
+        const char *opt = Tcl_GetString(objv[i]);
+        if (strcmp(opt, "-dpi") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, objv[i+1], &dpi) != TCL_OK)
+                return TCL_ERROR;
+            if (dpi <= 0) {
+                Tcl_SetObjResult(interp,
+                    Tcl_NewStringObj("-dpi must be positive", -1));
+                return TCL_ERROR;
+            }
+        } else if (strcmp(opt, "-imagename") == 0) {
+            imgname = Tcl_GetString(objv[i+1]);
+        } else {
+            Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+                "unknown option \"%s\": must be -dpi or -imagename", opt));
+            return TCL_ERROR;
+        }
+    }
+
+    double wpt = FPDF_GetPageWidth(e->page);
+    double hpt = FPDF_GetPageHeight(e->page);
+    int w_px = (int)(wpt * dpi / 72.0 + 0.5);
+    int h_px = (int)(hpt * dpi / 72.0 + 0.5);
+    if (w_px < 1) w_px = 1;
+    if (h_px < 1) h_px = 1;
+
+    FPDF_BITMAP bmp = FPDFBitmap_Create(w_px, h_px, 1);
+    if (!bmp) PDFIUM_ERROR(interp, "cannot create bitmap");
+    FPDFBitmap_FillRect(bmp, 0, 0, w_px, h_px, 0xFFFFFFFF);
+    int flags = FPDF_ANNOT;
+    FPDF_RenderPageBitmap(bmp, e->page, 0, 0, w_px, h_px, 0, flags);
+    /* DIESELBE Umgebung wie beim Tippen -- das ist der ganze Sinn. */
+    FPDF_FFLDraw(e->form, bmp, e->page, 0, 0, w_px, h_px, 0, flags);
+
+    Tk_PhotoHandle photo = Tk_FindPhoto(interp, imgname);
+    if (!photo) {
+        Tcl_Obj *cmd = Tcl_ObjPrintf("image create photo %s", imgname);
+        Tcl_IncrRefCount(cmd);
+        int rc = Tcl_EvalObjEx(interp, cmd, TCL_EVAL_GLOBAL);
+        Tcl_DecrRefCount(cmd);
+        if (rc != TCL_OK) { FPDFBitmap_Destroy(bmp); return TCL_ERROR; }
+        photo = Tk_FindPhoto(interp, imgname);
+    }
+    if (!photo) {
+        FPDFBitmap_Destroy(bmp);
+        PDFIUM_ERROR(interp, "cannot create Tk photo image");
+    }
+
+    Tk_PhotoImageBlock block;
+    block.pixelPtr  = (unsigned char *)FPDFBitmap_GetBuffer(bmp);
+    block.width     = w_px;
+    block.height    = h_px;
+    block.pitch     = FPDFBitmap_GetStride(bmp);
+    block.pixelSize = 4;
+    /* BGRA, wie bei render: PDFium legt Blau zuerst ab. */
+    block.offset[0] = 2;
+    block.offset[1] = 1;
+    block.offset[2] = 0;
+    block.offset[3] = 3;
+    Tk_PhotoSetSize(interp, photo, w_px, h_px);
+    Tk_PhotoPutBlock(interp, photo, &block, 0, 0, w_px, h_px,
+                     TK_PHOTO_COMPOSITE_SET);
+    FPDFBitmap_Destroy(bmp);
+
+    Tcl_SetObjResult(interp, Tcl_ObjPrintf("%d %d", w_px, h_px));
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::formfill doc-handle pagenum dict                            */
+/*                                                                     */
+/* Felder einer Seite ausfuellen -- ueber PDFiums Formularumgebung,     */
+/* nicht durch Setzen von /V.                                          */
+/*                                                                     */
+/* WARUM DER UMWEG: FPDFAnnot_SetStringValue schriebe /V und liesse die */
+/* Erscheinung stehen. Genau diese Luecke hatte pdf4tcl::fillForms bis  */
+/* 0.9.4.64: der Bildschirm zeigte den neuen Wert, das Papier den       */
+/* alten -- bei einem leeren Feld gar nichts.                          */
+/*                                                                     */
+/* Die Formularumgebung geht den Weg, den ein Betrachter geht: Feld     */
+/* fokussieren, Inhalt auswaehlen, ersetzen. PDFium baut den            */
+/* Appearance-Strom dabei SELBST neu -- es ist der Formularmotor von    */
+/* Chrome und tut nichts anderes, wenn dort jemand tippt.              */
+/*                                                                     */
+/* WAS GEHT, und auf welchem Weg:                                      */
+/*                                                                     */
+/*   Textfeld      Fokus, alles auswaehlen, ersetzen                   */
+/*   Kombination   ueber die Beschriftung mit den Pfeiltasten waehlen   */
+/*   Listenfeld    ebenso                                              */
+/*   Ankreuzfeld   Wahrheitswert, Klick in die Mitte                    */
+/*   Optionsfeld   ebenso, aber nicht abwaehlbar                        */
+/*                                                                     */
+/* Schaltflaeche und Signatur nehmen weder Wert noch Zustand und        */
+/* werden GEMELDET, nicht uebergangen.                                  */
+/*                                                                     */
+/* Dieser Kommentar sagte bis zum 06.09.2026 "Grenze: Textfelder und    */
+/* Kombinationsfelder", waehrend der Rumpf laengst Kaestchen und        */
+/* Optionsfelder fuellte. Ein veralteter Kommentar ist schlimmer als    */
+/* keiner, weil er geglaubt wird -- und er steht direkt am Code.        */
+/*                                                                     */
+/* Nach dem Fuellen "save" rufen, sonst ist die Arbeit mit dem          */
+/* Schliessen weg.                                                     */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumFormFillCmd(ClientData cd, Tcl_Interp *interp,
+                  int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum dict");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    Tcl_Obj **wv; Tcl_Size wc;
+    if (Tcl_ListObjGetElements(interp, objv[3], &wc, &wv) != TCL_OK)
+        return TCL_ERROR;
+    if (wc % 2) {
+        Tcl_SetObjResult(interp,
+            Tcl_NewStringObj("values must be a dictionary", -1));
+        return TCL_ERROR;
+    }
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    FPDF_FORMFILLINFO ffi;
+    memset(&ffi, 0, sizeof(ffi));
+    ffi.version = 1;
+    FPDF_FORMHANDLE form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
+    if (!form) {
+        FPDF_ClosePage(page);
+        PDFIUM_ERROR(interp, "cannot init form environment");
+    }
+    FORM_OnAfterLoadPage(page, form);
+
+    int gefuellt = 0;
+    Tcl_Obj *fehlend = Tcl_NewListObj(0, NULL);
+    int n = FPDFPage_GetAnnotCount(page);
+
+    for (Tcl_Size k = 0; k < wc; k += 2) {
+        const char *wunschName = Tcl_GetString(wv[k]);
+        int getroffen = 0;
+
+        for (int i = 0; i < n; i++) {
+            FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, i);
+            if (!annot) continue;
+            if (FPDFAnnot_GetSubtype(annot) != FPDF_ANNOT_WIDGET) {
+                FPDFPage_CloseAnnot(annot);
+                continue;
+            }
+            unsigned long nlen =
+                FPDFAnnot_GetFormFieldName(form, annot, NULL, 0);
+            int passt = 0;
+            if (nlen > 2) {
+                unsigned short *nb = (unsigned short *)ckalloc(nlen);
+                FPDFAnnot_GetFormFieldName(form, annot, nb, nlen);
+                Tcl_Obj *nm = _AnnotUtf16ToObj(interp, nb, nlen);
+                ckfree((char *)nb);
+                passt = (strcmp(Tcl_GetString(nm), wunschName) == 0);
+                Tcl_DecrRefCount(nm);
+            }
+            if (!passt) {
+                FPDFPage_CloseAnnot(annot);
+                continue;
+            }
+
+            int typ = FPDFAnnot_GetFormFieldType(form, annot);
+            int fftyp2 = typ;
+
+            if (typ == FPDF_FORMFIELD_CHECKBOX
+                    || typ == FPDF_FORMFIELD_RADIOBUTTON) {
+                /* Ein Kaestchen nimmt keinen Text, sondern einen
+                 * ZUSTAND. Der Wert ist darum ein Wahrheitswert.
+                 *
+                 * Umgeschaltet wird mit einem KLICK in die Mitte des
+                 * Feldes -- denselben Weg geht ein Betrachter, und
+                 * PDFium fuehrt dabei /V, /AS und die Erscheinung
+                 * zusammen nach. Wer /V allein setzte, haette das
+                 * Kaestchen in der Datei angekreuzt und auf dem Papier
+                 * leer.
+                 *
+                 * VORHER MESSEN, nicht blind klicken: FPDFAnnot_IsChecked
+                 * sagt den Zustand. Ein Klick auf ein bereits
+                 * angekreuztes Kaestchen wuerde es abwaehlen -- und
+                 * "setze auf ja" haette dann das Gegenteil bewirkt.
+                 *
+                 * Ein OPTIONSFELD laesst sich nicht abwaehlen: in einer
+                 * Gruppe ist immer eines gewaehlt. "0" auf ein
+                 * Optionsfeld wird darum gemeldet statt still zu
+                 * scheitern.
+                 */
+                int soll;
+                if (Tcl_GetBooleanFromObj(interp, wv[k+1], &soll) != TCL_OK) {
+                    FPDFPage_CloseAnnot(annot);
+                    FORM_OnBeforeClosePage(page, form);
+                    FPDFDOC_ExitFormFillEnvironment(form);
+                    FPDF_ClosePage(page);
+                    Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+                        "formfill: \"%s\" is a %s and takes a boolean,"
+                        " not \"%s\"", wunschName,
+                        typ == FPDF_FORMFIELD_CHECKBOX ? "check box"
+                                                       : "radio button",
+                        Tcl_GetString(wv[k+1])));
+                    return TCL_ERROR;
+                }
+                int ist = FPDFAnnot_IsChecked(form, annot) ? 1 : 0;
+                if (!soll && typ == FPDF_FORMFIELD_RADIOBUTTON) {
+                    FPDFPage_CloseAnnot(annot);
+                    Tcl_ListObjAppendElement(interp, fehlend,
+                            Tcl_ObjPrintf("%s (a radio button cannot be"
+                                          " unset; select another one)",
+                                          wunschName));
+                    getroffen = 1;
+                    break;
+                }
+                if (ist != soll) {
+                    FS_RECTF r;
+                    if (FPDFAnnot_GetRect(annot, &r)) {
+                        double cx = (r.left + r.right) / 2.0;
+                        double cy = (r.top + r.bottom) / 2.0;
+                        FORM_OnLButtonDown(form, page, 0, cx, cy);
+                        FORM_OnLButtonUp(form, page, 0, cx, cy);
+                    }
+                }
+                FORM_ForceToKillFocus(form);
+                FPDFPage_CloseAnnot(annot);
+                gefuellt++;
+                getroffen = 1;
+                break;
+            }
+
+            if (typ != FPDF_FORMFIELD_TEXTFIELD
+                    && typ != FPDF_FORMFIELD_COMBOBOX
+                    && typ != FPDF_FORMFIELD_LISTBOX) {
+                /* Kein Text und keine Auswahl -- also nicht zu fuellen.
+                 * Still zu ueberspringen waere schlimmer: der Aufrufer
+                 * haette den Namen genannt und bekaeme keine Antwort.
+                 *
+                 * LISTBOX gehoert seit dem 06.09.2026 dazu. Der Zweig,
+                 * der sie behandelt, stand schon darunter -- diese
+                 * Wache liess ihn aber nie erreichen. Toter Code, den
+                 * ich beim Einbauen der Auswahl selbst hinterlassen
+                 * habe; gemeldet aus einer Durchsicht, nachgemessen:
+                 * dreimal "down" waehlt "Vreden". */
+                FPDFPage_CloseAnnot(annot);
+                Tcl_ListObjAppendElement(interp, fehlend,
+                        Tcl_ObjPrintf("%s (not a fillable field)", wunschName));
+                getroffen = 1;
+                break;
+            }
+
+            /* AUSWAHLFELDER werden GEWAEHLT, nicht beschrieben.
+             *
+             * Ein Kombinationsfeld ohne Bearbeitungsflagge laesst sich
+             * nicht beschreiben -- ReplaceSelection tut dort nichts, und
+             * bis hierher meldete formfill trotzdem einen Erfolg.
+             *
+             * Gewaehlt wird mit den Pfeiltasten, so wie ein Betrachter
+             * es tut: erst nach ganz oben, dann so oft nach unten, wie
+             * der Eintrag von oben entfernt ist. Gemessen: nach
+             * "down" stand "Artikel A" im Feld -- allerdings erst nach
+             * dem Fokusverlust, wie ueberall bei PDFium.
+             *
+             * Gesucht wird ueber die BESCHRIFTUNG, weil der Aufrufer
+             * die kennt und nicht den Index. Steht sie nicht in der
+             * Liste, wird das gemeldet -- mitsamt den erlaubten Werten.
+             */
+            if (fftyp2 == FPDF_FORMFIELD_COMBOBOX
+                    || fftyp2 == FPDF_FORMFIELD_LISTBOX) {
+                int oc = FPDFAnnot_GetOptionCount(form, annot);
+                int ziel = -1;
+                Tcl_Obj *erlaubt = Tcl_NewListObj(0, NULL);
+                for (int q = 0; q < oc; q++) {
+                    unsigned long ll =
+                        FPDFAnnot_GetOptionLabel(form, annot, q, NULL, 0);
+                    if (ll <= 2) continue;
+                    unsigned short *lb = (unsigned short *)ckalloc(ll);
+                    FPDFAnnot_GetOptionLabel(form, annot, q, lb, ll);
+                    Tcl_Obj *lab = _AnnotUtf16ToObj(interp, lb, ll);
+                    ckfree((char *)lb);
+                    Tcl_ListObjAppendElement(interp, erlaubt, lab);
+                    if (ziel < 0 && strcmp(Tcl_GetString(lab),
+                                           Tcl_GetString(wv[k+1])) == 0) {
+                        ziel = q;
+                    }
+                }
+                if (ziel < 0) {
+                    Tcl_ListObjAppendElement(interp, fehlend,
+                        Tcl_ObjPrintf("%s (no such option; allowed: %s)",
+                            wunschName, Tcl_GetString(erlaubt)));
+                    FPDFPage_CloseAnnot(annot);
+                    getroffen = 1;
+                    break;
+                }
+                FORM_SetFocusedAnnot(form, annot);
+                /* Nach ganz oben: einmal mehr als es Eintraege gibt, dann
+                 * steht die Auswahl sicher auf dem ersten -- eine
+                 * Home-Taste tut hier nichts, gemessen. */
+                for (int q = 0; q <= oc; q++) {
+                    FORM_OnKeyDown(form, page, FWL_VKEY_Up, 0);
+                    FORM_OnKeyUp(form, page, FWL_VKEY_Up, 0);
+                }
+                /* Wieviele Schritte nach unten? NACHFRAGEN, nicht
+                 * annehmen.
+                 *
+                 * Beim KOMBINATIONSFELD ist nach dem Hochlaufen nichts
+                 * gewaehlt -- der erste "down" waehlt erst den ersten
+                 * Eintrag, also braucht es ziel+1 Schritte. Beim
+                 * LISTENFELD steht die Auswahl danach auf dem ersten,
+                 * also ziel.
+                 *
+                 * Beides gemessen, und beide Male an einem Versatz um
+                 * eins aufgefallen: "Artikel C" landete auf "Artikel B",
+                 * spaeter "Bremen" auf "Hamburg". Zweimal dieselbe
+                 * Annahme, zweimal falsch -- darum steht hier jetzt eine
+                 * Frage statt einer Regel.
+                 *
+                 * IsOptionSelected sagt es. Ist der erste Eintrag schon
+                 * gewaehlt, sind es ziel Schritte, sonst ziel+1. */
+                int schritte = ziel + 1;
+                if (FPDFAnnot_IsOptionSelected(form, annot, 0)) {
+                    schritte = ziel;
+                }
+                for (int q = 0; q < schritte; q++) {
+                    FORM_OnKeyDown(form, page, FWL_VKEY_Down, 0);
+                    FORM_OnKeyUp(form, page, FWL_VKEY_Down, 0);
+                }
+                FORM_ForceToKillFocus(form);
+                FPDFPage_CloseAnnot(annot);
+                gefuellt++;
+                getroffen = 1;
+                break;
+            }
+
+            /* Der Weg eines Betrachters: fokussieren, alles auswaehlen,
+             * ersetzen. Ohne SelectAllText wuerde der neue Text an den
+             * alten angehaengt statt ihn zu ersetzen. */
+            FORM_SetFocusedAnnot(form, annot);
+            FORM_SelectAllText(form, page);
+            Tcl_DString ds;
+            const unsigned short *w = _ToUtf16(wv[k+1], &ds);
+            FORM_ReplaceSelection(form, page, (FPDF_WIDESTRING)w);
+            Tcl_DStringFree(&ds);
+            FORM_ForceToKillFocus(form);
+
+            /* NACHSEHEN, ob es gewirkt hat.
+             *
+             * Bei einem Kombinationsfeld OHNE Bearbeitungsflagge tut
+             * ReplaceSelection nichts: man kann dort nur waehlen, nicht
+             * schreiben. Gemessen an pdf4tcls demo-forms.pdf --
+             * formfill meldete "1 gefuellt" und der Wert blieb leer.
+             *
+             * Ein stiller Falscherfolg ist schlimmer als eine Absage:
+             * der Aufrufer haelt die Datei fuer fertig. Also
+             * nachlesen und, wenn nichts ankam, die erlaubten Werte
+             * NENNEN -- die haben wir seit dieser Fassung. */
+            unsigned long pl = FPDFAnnot_GetFormFieldValue(form, annot,
+                                                           NULL, 0);
+            int gleich = 0;
+            if (pl > 2) {
+                unsigned short *pb = (unsigned short *)ckalloc(pl);
+                FPDFAnnot_GetFormFieldValue(form, annot, pb, pl);
+                Tcl_Obj *jetzt = _AnnotUtf16ToObj(interp, pb, pl);
+                ckfree((char *)pb);
+                gleich = (strcmp(Tcl_GetString(jetzt),
+                                 Tcl_GetString(wv[k+1])) == 0);
+                Tcl_DecrRefCount(jetzt);
+            }
+            if (!gleich) {
+                Tcl_Obj *erlaubt = Tcl_NewListObj(0, NULL);
+                int oc = FPDFAnnot_GetOptionCount(form, annot);
+                for (int q = 0; q < oc; q++) {
+                    unsigned long ll =
+                        FPDFAnnot_GetOptionLabel(form, annot, q, NULL, 0);
+                    if (ll <= 2) continue;
+                    unsigned short *lb = (unsigned short *)ckalloc(ll);
+                    FPDFAnnot_GetOptionLabel(form, annot, q, lb, ll);
+                    Tcl_ListObjAppendElement(interp, erlaubt,
+                            _AnnotUtf16ToObj(interp, lb, ll));
+                    ckfree((char *)lb);
+                }
+                Tcl_Size ne;
+                Tcl_ListObjLength(interp, erlaubt, &ne);
+                if (ne > 0) {
+                    Tcl_ListObjAppendElement(interp, fehlend,
+                        Tcl_ObjPrintf("%s (value did not take; allowed: %s)",
+                            wunschName, Tcl_GetString(erlaubt)));
+                } else {
+                    Tcl_ListObjAppendElement(interp, fehlend,
+                        Tcl_ObjPrintf("%s (value did not take)", wunschName));
+                }
+                FPDFPage_CloseAnnot(annot);
+                getroffen = 1;
+                break;
+            }
+
+            FPDFPage_CloseAnnot(annot);
+            gefuellt++;
+            getroffen = 1;
+            break;
+        }
+        if (!getroffen) {
+            Tcl_ListObjAppendElement(interp, fehlend,
+                    Tcl_NewStringObj(wunschName, -1));
+        }
+    }
+
+    FORM_OnBeforeClosePage(page, form);
+    FPDFDOC_ExitFormFillEnvironment(form);
+    FPDF_ClosePage(page);
+
+    Tcl_Size nf;
+    Tcl_ListObjLength(interp, fehlend, &nf);
+    if (nf > 0) {
+        /* Nennen, WELCHE Namen nicht ankamen. "3 von 5 gefuellt" laesst
+         * den Aufrufer suchen. */
+        /* Eine Sammelmeldung fuer zwei verschiedene Faelle -- "nicht
+         * gefunden" und "hat nicht gewirkt". Der Vorspann muss darum
+         * neutral sein: "no such text field" war falsch, sobald der
+         * zweite Fall dazukam, und eine falsche Meldung schickt den
+         * Leser in die falsche Richtung. Was genau war, steht je
+         * Eintrag dahinter. */
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+            "formfill: could not fill on page %d: %s",
+            pagenum, Tcl_GetString(fehlend)));
+        return TCL_ERROR;
+    }
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(gefuellt));
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Anmerkungen erzeugen und entfernen                                  */
+/*                                                                     */
+/*   pdfium::addannot doc-handle pagenum typ {links unten rechts oben} */
+/*                    ?-color {r g b}? ?-opacity 0..1?                 */
+/*                    ?-contents text? ?-author name?                  */
+/*   pdfium::delannot doc-handle pagenum index                         */
+/*                                                                     */
+/* typ: highlight, underline, strikeout, squiggly, square, text        */
+/*                                                                     */
+/* DER DRITTE WEG. Ein Wort hervorheben geht auf drei Arten:            */
+/*                                                                     */
+/*   stempeln   (tclpdfwriter) -- Original unberuehrt, Markierung liegt */
+/*              darueber, aber sie ist Zeichnung und nicht wegzunehmen  */
+/*   einbrennen (flatten) -- endgueltig Teil der Seite                  */
+/*   ANMERKEN   -- bleibt entfernbar und maschinell lesbar              */
+/*                                                                     */
+/* Fuer "dieses Wort markieren" ist der dritte meist der richtige: ein  */
+/* Betrachter kann sie anklicken, ausblenden, exportieren. Mit          */
+/* "search -rects 1" hat man die Koordinaten dafuer schon.              */
+/*                                                                     */
+/* KEIN /AP VON UNS -- und das ist eine Zusage, keine Nachlaessigkeit.  */
+/* Einen korrekten Appearance-Strom fuer ein Highlight zu bauen hiesse, */
+/* Transparenzgruppen und Blend-Modi von Hand zu schreiben. Ohne /AP    */
+/* zeichnen Betrachter die Markierung aus /QuadPoints und /C selbst;    */
+/* "render -forms 1" tut das ebenfalls, also laesst es sich messen.     */
+/* Das ist dieselbe Luecke, die pdf4tcls fillForms hat -- hier von      */
+/* vornherein benannt statt spaeter entdeckt.                          */
+/*                                                                     */
+/* Nach dem Anlegen "save" rufen, sonst ist die Arbeit mit dem          */
+/* Schliessen weg.                                                     */
+/* ------------------------------------------------------------------ */
+static int
+_AnnotTypeFromName(const char *name)
+{
+    if (strcmp(name, "highlight") == 0) return FPDF_ANNOT_HIGHLIGHT;
+    if (strcmp(name, "underline") == 0) return FPDF_ANNOT_UNDERLINE;
+    if (strcmp(name, "strikeout") == 0) return FPDF_ANNOT_STRIKEOUT;
+    if (strcmp(name, "squiggly")  == 0) return FPDF_ANNOT_SQUIGGLY;
+    if (strcmp(name, "square")    == 0) return FPDF_ANNOT_SQUARE;
+    if (strcmp(name, "text")      == 0) return FPDF_ANNOT_TEXT;
+    return -1;
+}
+
+
+static int
+PdfiumAddAnnotCmd(ClientData cd, Tcl_Interp *interp,
+                  int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc < 5 || ((objc - 5) % 2) != 0) {
+        Tcl_WrongNumArgs(interp, 1, objv,
+                "doc-handle pagenum type {left bottom right top} ?options?");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    const char *typname = Tcl_GetString(objv[3]);
+    int subtype = _AnnotTypeFromName(typname);
+    if (subtype < 0) {
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+            "unknown annotation type \"%s\": must be highlight, underline,"
+            " strikeout, squiggly, square or text", typname));
+        return TCL_ERROR;
+    }
+
+    /* Das Rechteck wie ueberall in diesem Paket: {links unten rechts
+     * oben}. PDFium nimmt FS_RECTF mit top VOR bottom -- dieselbe
+     * Vertauschungsfalle wie bei GetCharBox. Nach aussen bleibt es
+     * einheitlich, und die Umsortierung steht an genau einer Stelle. */
+    Tcl_Obj **rv; Tcl_Size rc;
+    if (Tcl_ListObjGetElements(interp, objv[4], &rc, &rv) != TCL_OK)
+        return TCL_ERROR;
+    if (rc != 4) {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "rectangle needs {left bottom right top} in points", -1));
+        return TCL_ERROR;
+    }
+    double l, u, r, t;
+    if (Tcl_GetDoubleFromObj(interp, rv[0], &l) != TCL_OK ||
+        Tcl_GetDoubleFromObj(interp, rv[1], &u) != TCL_OK ||
+        Tcl_GetDoubleFromObj(interp, rv[2], &r) != TCL_OK ||
+        Tcl_GetDoubleFromObj(interp, rv[3], &t) != TCL_OK)
+        return TCL_ERROR;
+    if (r <= l || t <= u) {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "rectangle: right must exceed left and top must exceed bottom",
+            -1));
+        return TCL_ERROR;
+    }
+
+    double cr = 1.0, cg = 1.0, cb = 0.0, alpha = 1.0;
+    int haveColor = 0;
+    Tcl_Obj *contents = NULL, *author = NULL;
+    for (int i = 5; i < objc; i += 2) {
+        const char *opt = Tcl_GetString(objv[i]);
+        if (strcmp(opt, "-color") == 0) {
+            Tcl_Obj **cv; Tcl_Size cc;
+            if (Tcl_ListObjGetElements(interp, objv[i+1], &cc, &cv) != TCL_OK)
+                return TCL_ERROR;
+            if (cc != 3) {
+                Tcl_SetObjResult(interp,
+                    Tcl_NewStringObj("-color needs {r g b}, each 0..1", -1));
+                return TCL_ERROR;
+            }
+            if (Tcl_GetDoubleFromObj(interp, cv[0], &cr) != TCL_OK ||
+                Tcl_GetDoubleFromObj(interp, cv[1], &cg) != TCL_OK ||
+                Tcl_GetDoubleFromObj(interp, cv[2], &cb) != TCL_OK)
+                return TCL_ERROR;
+            haveColor = 1;
+        } else if (strcmp(opt, "-opacity") == 0) {
+            if (Tcl_GetDoubleFromObj(interp, objv[i+1], &alpha) != TCL_OK)
+                return TCL_ERROR;
+            if (alpha < 0.0 || alpha > 1.0) {
+                Tcl_SetObjResult(interp,
+                    Tcl_NewStringObj("-opacity must be between 0 and 1", -1));
+                return TCL_ERROR;
+            }
+            haveColor = 1;
+        } else if (strcmp(opt, "-contents") == 0) {
+            contents = objv[i+1];
+        } else if (strcmp(opt, "-author") == 0) {
+            author = objv[i+1];
+        } else {
+            Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+                "unknown option \"%s\": must be -color, -opacity,"
+                " -contents or -author", opt));
+            return TCL_ERROR;
+        }
+    }
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    FPDF_ANNOTATION a = FPDFPage_CreateAnnot(page,
+            (FPDF_ANNOTATION_SUBTYPE)subtype);
+    if (!a) {
+        FPDF_ClosePage(page);
+        PDFIUM_ERROR(interp, "cannot create annotation");
+    }
+
+    FS_RECTF rect;
+    rect.left = (float)l; rect.bottom = (float)u;
+    rect.right = (float)r; rect.top = (float)t;
+    FPDFAnnot_SetRect(a, &rect);
+
+    /* Textmarkierungen brauchen /QuadPoints, sonst zeichnet ein
+     * Betrachter nichts -- das Rechteck allein genuegt ihnen nicht
+     * (ISO 32000-1 12.5.6.10). Fuer ein einzelnes Rechteck sind die
+     * vier Punkte die Ecken, und zwar in der Reihenfolge
+     * oben-links, oben-rechts, unten-links, unten-rechts. */
+    if (subtype == FPDF_ANNOT_HIGHLIGHT || subtype == FPDF_ANNOT_UNDERLINE ||
+        subtype == FPDF_ANNOT_STRIKEOUT || subtype == FPDF_ANNOT_SQUIGGLY) {
+        FS_QUADPOINTSF q;
+        q.x1 = (float)l; q.y1 = (float)t;
+        q.x2 = (float)r; q.y2 = (float)t;
+        q.x3 = (float)l; q.y3 = (float)u;
+        q.x4 = (float)r; q.y4 = (float)u;
+        FPDFAnnot_AppendAttachmentPoints(a, &q);
+    }
+
+    if (haveColor) {
+        FPDFAnnot_SetColor(a, FPDFANNOT_COLORTYPE_Color,
+                (unsigned int)(cr * 255.0 + 0.5),
+                (unsigned int)(cg * 255.0 + 0.5),
+                (unsigned int)(cb * 255.0 + 0.5),
+                (unsigned int)(alpha * 255.0 + 0.5));
+    }
+    if (contents) {
+        Tcl_DString ds;
+        const unsigned short *w = _ToUtf16(contents, &ds);
+        FPDFAnnot_SetStringValue(a, "Contents", (FPDF_WIDESTRING)w);
+        Tcl_DStringFree(&ds);
+    }
+    if (author) {
+        Tcl_DString ds;
+        const unsigned short *w = _ToUtf16(author, &ds);
+        FPDFAnnot_SetStringValue(a, "T", (FPDF_WIDESTRING)w);
+        Tcl_DStringFree(&ds);
+    }
+
+    int idx = FPDFPage_GetAnnotIndex(page, a);
+    FPDFPage_CloseAnnot(a);
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(idx));
+    return TCL_OK;
+}
+
+static int
+PdfiumDelAnnotCmd(ClientData cd, Tcl_Interp *interp,
+                  int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum index");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum, idx;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK) return TCL_ERROR;
+    if (Tcl_GetIntFromObj(interp, objv[3], &idx) != TCL_OK) return TCL_ERROR;
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+    int n = FPDFPage_GetAnnotCount(page);
+    if (idx < 0 || idx >= n) {
+        FPDF_ClosePage(page);
+        Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+            "annotation index %d out of range (0..%d)", idx, n - 1));
+        return TCL_ERROR;
+    }
+    FPDF_BOOL ok = FPDFPage_RemoveAnnot(page, idx);
+    int rest = FPDFPage_GetAnnotCount(page);
+    FPDF_ClosePage(page);
+    if (!ok) PDFIUM_ERROR(interp, "cannot remove annotation");
+    Tcl_SetObjResult(interp, Tcl_NewIntObj(rest));
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::signatures doc-handle                                       */
+/*                                                                     */
+/* Je Signatur ein dict:                                               */
+/*                                                                     */
+/*   index      laufende Nummer                                        */
+/*   subfilter  das Verfahren, etwa "adbe.pkcs7.detached"              */
+/*   reason     der angegebene Grund                                    */
+/*   time       Zeitpunkt als D:YYYYMMDDHHMMSS+XX'YY'                  */
+/*   docmdp     1, 2 oder 3 -- was nach der Signatur noch erlaubt ist   */
+/*   ranges     die /ByteRange-Zahlen                                   */
+/*   covered    wieviele Bytes die Signatur abdeckt                     */
+/*   size       Laenge des PKCS#7-Blocks                                */
+/*                                                                     */
+/* WAS DAS NICHT IST: eine PRUEFUNG. PDFium liefert die Bestandteile,   */
+/* es rechnet nichts nach. Ob die Signatur gueltig ist, ob das          */
+/* Zertifikat taugt, ob es zurueckgezogen wurde -- nichts davon steht   */
+/* hier. Wer aus "signatures gibt etwas zurueck" schliesst "das         */
+/* Dokument ist unversehrt", irrt sich, und zwar in der gefaehrlichen   */
+/* Richtung.                                                            */
+/*                                                                     */
+/* WOFUER ES TROTZDEM TAUGT: "covered" gegen die Dateigroesse. Deckt    */
+/* die Signatur weniger ab als die Datei gross ist, wurde nach dem      */
+/* Unterschreiben etwas angehaengt -- eine inkrementelle Aenderung.     */
+/* Das ist keine Pruefung, aber ein Hinweis, den man ohne Krypto        */
+/* bekommt.                                                             */
+/* ------------------------------------------------------------------ */
+static Tcl_Obj *
+_SigAscii(FPDF_SIGNATURE sig,
+          unsigned long (*fn)(FPDF_SIGNATURE, void *, unsigned long))
+{
+    unsigned long len = fn(sig, NULL, 0);
+    if (len <= 1) return Tcl_NewStringObj("", 0);
+    char *buf = ckalloc(len + 1);
+    fn(sig, buf, len);
+    buf[len] = 0;
+    /* Die Laenge schliesst die abschliessende Null ein; ohne das
+     * Abschneiden haengt bei jedem Wert ein Nullbyte an, und das faellt
+     * erst auf, wenn jemand vergleicht. */
+    Tcl_Size n = (Tcl_Size)len;
+    while (n > 0 && buf[n - 1] == 0) n--;
+    Tcl_Obj *o = Tcl_NewStringObj(buf, n);
+    ckfree(buf);
+    return o;
+}
+
+static int
+PdfiumSignaturesCmd(ClientData cd, Tcl_Interp *interp,
+                    int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+    int n = FPDF_GetSignatureCount(doc);
+    for (int i = 0; i < n; i++) {
+        FPDF_SIGNATURE sig = FPDF_GetSignatureObject(doc, i);
+        if (!sig) continue;
+        Tcl_Obj *d = Tcl_NewListObj(0, NULL);
+
+#define SIG_PUT(k, v) do { \
+            Tcl_ListObjAppendElement(interp, d, Tcl_NewStringObj((k), -1)); \
+            Tcl_ListObjAppendElement(interp, d, (v)); \
+        } while (0)
+
+        SIG_PUT("index", Tcl_NewIntObj(i));
+
+        /* subfilter und time sind 7-Bit-ASCII, reason ist UTF-16LE --
+         * drei Kodierungen in einer Schnittstelle. Wer sie gleich
+         * behandelt, bekommt bei "reason" jedes zweite Zeichen als
+         * Null. Steht so in fpdf_signature.h. */
+        SIG_PUT("subfilter", _SigAscii(sig, (unsigned long (*)(FPDF_SIGNATURE,
+                void *, unsigned long))FPDFSignatureObj_GetSubFilter));
+        SIG_PUT("time", _SigAscii(sig, (unsigned long (*)(FPDF_SIGNATURE,
+                void *, unsigned long))FPDFSignatureObj_GetTime));
+
+        unsigned long rl = FPDFSignatureObj_GetReason(sig, NULL, 0);
+        if (rl > 2) {
+            unsigned short *rb = (unsigned short *)ckalloc(rl);
+            FPDFSignatureObj_GetReason(sig, rb, rl);
+            SIG_PUT("reason", _AnnotUtf16ToObj(interp, rb, rl));
+            ckfree((char *)rb);
+        } else {
+            SIG_PUT("reason", Tcl_NewStringObj("", 0));
+        }
+
+        SIG_PUT("docmdp",
+                Tcl_NewIntObj((int)FPDFSignatureObj_GetDocMDPPermission(sig)));
+
+        /* ByteRange: Paare aus Anfang und Laenge. Die Summe der Laengen
+         * ist, was die Signatur abdeckt. */
+        unsigned long anz = FPDFSignatureObj_GetByteRange(sig, NULL, 0);
+        Tcl_Obj *ranges = Tcl_NewListObj(0, NULL);
+        Tcl_WideInt covered = 0;
+        if (anz > 0) {
+            int *rb = (int *)ckalloc(anz * sizeof(int));
+            FPDFSignatureObj_GetByteRange(sig, rb, anz);
+            for (unsigned long k = 0; k < anz; k++) {
+                Tcl_ListObjAppendElement(interp, ranges, Tcl_NewIntObj(rb[k]));
+                if (k % 2 == 1) { covered += rb[k]; }
+            }
+            ckfree((char *)rb);
+        }
+        SIG_PUT("ranges", ranges);
+        SIG_PUT("covered", Tcl_NewWideIntObj(covered));
+        SIG_PUT("size",
+                Tcl_NewWideIntObj((Tcl_WideInt)
+                        FPDFSignatureObj_GetContents(sig, NULL, 0)));
+#undef SIG_PUT
+        Tcl_ListObjAppendElement(interp, result, d);
+    }
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* Eingebettete Dateien (Anhaenge)                                     */
+/*                                                                     */
+/*   pdfium::attachments doc-handle                                    */
+/*       Liste von {index name groesse}                                */
+/*   pdfium::attachment  doc-handle index                              */
+/*       der INHALT als Bytefolge                                      */
+/*   pdfium::addattachment doc-handle name daten                       */
+/*   pdfium::delattachment doc-handle index                            */
+/*                                                                     */
+/* WOZU: eine Rechnung nach ZUGFeRD traegt ihre XML-Fassung als Anhang, */
+/* und ein Frachtbrief kann Belege mitfuehren. tclpdfreader holt sie    */
+/* heute ueber qpdf -- also ueber ein externes Programm, das auf einer  */
+/* Maschine fehlen kann. Hier gehen sie nativ, und SCHREIBEN geht auch. */
+/*                                                                     */
+/* UEBER DEN INDEX, nicht ueber den Namen: Namen duerfen sich           */
+/* wiederholen (ISO 32000-1 7.11.4 verlangt keine Eindeutigkeit).       */
+/* Wer nach Namen loeschte, traefe womoeglich den falschen -- und       */
+/* merkte es nicht. "attachments" nennt den Index gleich mit.           */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumAttachmentsCmd(ClientData cd, Tcl_Interp *interp,
+                     int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+    int n = FPDFDoc_GetAttachmentCount(doc);
+    for (int i = 0; i < n; i++) {
+        FPDF_ATTACHMENT a = FPDFDoc_GetAttachment(doc, i);
+        if (!a) continue;
+        Tcl_Obj *e = Tcl_NewListObj(0, NULL);
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewIntObj(i));
+
+        unsigned long nl = FPDFAttachment_GetName(a, NULL, 0);
+        if (nl > 2) {
+            unsigned short *nb = (unsigned short *)ckalloc(nl);
+            FPDFAttachment_GetName(a, nb, nl);
+            Tcl_ListObjAppendElement(interp, e,
+                    _AnnotUtf16ToObj(interp, nb, nl));
+            ckfree((char *)nb);
+        } else {
+            Tcl_ListObjAppendElement(interp, e, Tcl_NewStringObj("", 0));
+        }
+
+        /* Die Groesse OHNE den Inhalt zu holen: GetFile mit einem
+         * Nullpuffer schreibt nur die noetige Laenge. Eine Liste aller
+         * Anhaenge soll nicht zwanzig Megabyte in den Speicher ziehen,
+         * nur damit jemand die Namen sieht. */
+        unsigned long fl = 0;
+        if (!FPDFAttachment_GetFile(a, NULL, 0, &fl)) { fl = 0; }
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewWideIntObj((Tcl_WideInt)fl));
+        Tcl_ListObjAppendElement(interp, result, e);
+    }
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
+}
+
+static int
+PdfiumAttachmentCmd(ClientData cd, Tcl_Interp *interp,
+                    int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle index");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int idx;
+    if (Tcl_GetIntFromObj(interp, objv[2], &idx) != TCL_OK)
+        return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+    int n = FPDFDoc_GetAttachmentCount(doc);
+    if (idx < 0 || idx >= n) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("attachment index %d out of range (0..%d)",
+                          idx, n - 1));
+        return TCL_ERROR;
+    }
+    FPDF_ATTACHMENT a = FPDFDoc_GetAttachment(doc, idx);
+    if (!a) PDFIUM_ERROR(interp, "cannot get attachment");
+
+    unsigned long need = 0;
+    if (!FPDFAttachment_GetFile(a, NULL, 0, &need) || need == 0) {
+        /* Ein Anhang OHNE Inhalt ist kein Fehler: der Eintrag kann da
+         * sein und die Datei fehlen. Eine leere Bytefolge sagt das. */
+        Tcl_SetObjResult(interp, Tcl_NewByteArrayObj((unsigned char *)"", 0));
+        return TCL_OK;
+    }
+    unsigned char *buf = (unsigned char *)ckalloc(need);
+    unsigned long got = 0;
+    if (!FPDFAttachment_GetFile(a, buf, need, &got)) {
+        ckfree((char *)buf);
+        PDFIUM_ERROR(interp, "cannot read attachment");
+    }
+    /* Als BYTEARRAY, nicht als Zeichenkette: ein Anhang ist beliebiges
+     * Binaermaterial, und eine Zeichenkette wuerde es durch die
+     * Systemkodierung schicken. */
+    Tcl_SetObjResult(interp, Tcl_NewByteArrayObj(buf, (Tcl_Size)got));
+    ckfree((char *)buf);
+    return TCL_OK;
+}
+
+static int
+PdfiumAddAttachmentCmd(ClientData cd, Tcl_Interp *interp,
+                       int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 4) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle name data");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+
+    /* Der Name geht als UTF-16LE hinein -- derselbe Weg wie bei
+     * "search". */
+    Tcl_DString nameDs;
+    Tcl_DStringInit(&nameDs);
+    const char *name_utf8 = Tcl_GetString(objv[2]);
+    Tcl_Encoding tenc = Tcl_GetEncoding(NULL, "utf-16le");
+    if (!tenc) tenc = Tcl_GetEncoding(NULL, "unicode");
+    if (tenc) {
+        Tcl_UtfToExternalDString(tenc, name_utf8, -1, &nameDs);
+        Tcl_FreeEncoding(tenc);
+    }
+    { char _z[2] = {0,0}; Tcl_DStringAppend(&nameDs, _z, 2); }
+    const unsigned short *nameUni =
+        (const unsigned short *)Tcl_DStringValue(&nameDs);
+
+    FPDF_ATTACHMENT a = FPDFDoc_AddAttachment(doc, (FPDF_WIDESTRING)nameUni);
+    Tcl_DStringFree(&nameDs);
+    if (!a) PDFIUM_ERROR(interp, "cannot add attachment");
+
+    Tcl_Size len = 0;
+    unsigned char *data = Tcl_GetByteArrayFromObj(objv[3], &len);
+    if (!FPDFAttachment_SetFile(a, doc, data, (unsigned long)len)) {
+        PDFIUM_ERROR(interp, "cannot write attachment contents");
+    }
+    /* Den Index zurueckgeben, nicht den Namen: damit laesst sich der
+     * neue Anhang sofort wieder ansprechen, ohne die Liste zu
+     * durchsuchen. */
+    Tcl_SetObjResult(interp,
+            Tcl_NewIntObj(FPDFDoc_GetAttachmentCount(doc) - 1));
+    return TCL_OK;
+}
+
+static int
+PdfiumDelAttachmentCmd(ClientData cd, Tcl_Interp *interp,
+                       int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle index");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int idx;
+    if (Tcl_GetIntFromObj(interp, objv[2], &idx) != TCL_OK)
+        return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+    int n = FPDFDoc_GetAttachmentCount(doc);
+    if (idx < 0 || idx >= n) {
+        Tcl_SetObjResult(interp,
+            Tcl_ObjPrintf("attachment index %d out of range (0..%d)",
+                          idx, n - 1));
+        return TCL_ERROR;
+    }
+    if (!FPDFDoc_DeleteAttachment(doc, idx)) {
+        PDFIUM_ERROR(interp, "cannot delete attachment");
+    }
+    /* PDFium entfernt den EINTRAG, nicht die Daten aus der Datei -- das
+     * steht so in fpdf_attachment.h. Wer eine Datei loswerden will,
+     * muss danach neu schreiben lassen; "save" allein reicht nicht
+     * zwingend. Das gehoert dokumentiert, sonst haelt es jemand fuer
+     * ein Loeschen. */
+    Tcl_SetObjResult(interp,
+            Tcl_NewIntObj(FPDFDoc_GetAttachmentCount(doc)));
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::catalog doc-handle                                          */
+/*                                                                     */
+/* Was der Katalog ueber das GANZE Dokument sagt:                       */
+/*                                                                     */
+/*   tagged    1, wenn ein Strukturbaum da ist (/MarkInfo /Marked)     */
+/*   language  der /Lang-Eintrag, "" wenn keiner                        */
+/*                                                                     */
+/* WOZU "tagged": ein Pruefer der Lesereihenfolge fragt sonst indirekt  */
+/* ueber einen leeren Strukturbaum -- und kann nicht unterscheiden      */
+/* zwischen "nicht ausgezeichnet" und "diese eine Seite hat nichts".    */
+/* Die Frage gehoert ans Dokument, nicht an die Seite.                  */
+/*                                                                     */
+/* WOZU "language": ohne /Lang weiss ein Vorleseprogramm nicht, in      */
+/* welcher Sprache es lesen soll, und spricht deutschen Text englisch   */
+/* aus. PDF/UA verlangt den Eintrag; er fehlt aber haeufig, und man     */
+/* sieht es dem Dokument nicht an.                                      */
+/*                                                                     */
+/* GRENZE: "tagged" sagt nur, dass ein Baum DA ist -- nicht, dass er    */
+/* etwas taugt. Ein Dokument, in dem jeder Absatz P heisst, ist         */
+/* getaggt und sagt einem Leser trotzdem nichts.                        */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumCatalogCmd(ClientData cd, Tcl_Interp *interp,
+                 int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+    Tcl_ListObjAppendElement(interp, result, Tcl_NewStringObj("tagged", -1));
+    Tcl_ListObjAppendElement(interp, result,
+            Tcl_NewIntObj(FPDFCatalog_IsTagged(doc) ? 1 : 0));
+
+    Tcl_ListObjAppendElement(interp, result, Tcl_NewStringObj("language", -1));
+    /* GetLanguage gibt bei fehlendem /Lang die Laenge 2 zurueck (die
+     * leere Zeichenkette mit Abschluss), bei einem Fehler 0. Beides
+     * ergibt aussen "" -- der Unterschied zwischen "kein Eintrag" und
+     * "Fehler" ist hier keiner, den ein Aufrufer nutzen koennte. */
+    unsigned long len = FPDFCatalog_GetLanguage(doc, NULL, 0);
+    if (len <= 2) {
+        Tcl_ListObjAppendElement(interp, result, Tcl_NewStringObj("", 0));
+    } else {
+        unsigned short *buf = (unsigned short *)ckalloc(len);
+        FPDFCatalog_GetLanguage(doc, buf, len);
+        Tcl_ListObjAppendElement(interp, result,
+                _AnnotUtf16ToObj(interp, buf, len));
+        ckfree((char *)buf);
+    }
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* pdfium::flatten doc-handle pagenum ?-mode display|print?            */
 /*                                                                     */
@@ -995,8 +2333,98 @@ PdfiumCharBoxesCmd(ClientData cd, Tcl_Interp *interp,
     return TCL_OK;
 }
 
+
 /* ------------------------------------------------------------------ */
-/* pdfium::pageobjects doc-handle pagenum                              */
+/* pdfium::images doc-handle pagenum                                   */
+/*                                                                     */
+/* Je Bild auf der Seite ein dict:                                     */
+/*                                                                     */
+/*   index    Objektnummer, wie bei pageobjects                        */
+/*   box      {links unten rechts oben} in Punkt                       */
+/*   width    Breite in BILDPUNKTEN                                    */
+/*   height   Hoehe in Bildpunkten                                     */
+/*   dpix     waagerechte Aufloesung, wie sie AUF DEM BLATT ankommt    */
+/*   dpiy     senkrechte                                               */
+/*   bpp      Bits je Bildpunkt                                        */
+/*   mcid     Marked-Content-ID, -1 wenn keine                         */
+/*                                                                     */
+/* WOZU: ein Scan kann tadellos aussehen und beim Druck flau werden --  */
+/* das merkt man am Ergebnis, wenn das Blatt schon durch ist. "dpix"    */
+/* sagt es vorher.                                                     */
+/*                                                                     */
+/* Die Zahl kommt VON PDFIUM, nicht aus einer eigenen Rechnung: es      */
+/* setzt Bildpunkte gegen das Rechteck auf dem Blatt und beruecksichtigt*/
+/* dabei die Transformationsmatrix des Objekts. Ein Bild kann gedreht   */
+/* oder verzerrt eingesetzt sein, und dann sind waagerecht und senkrecht*/
+/* verschieden -- "Breite durch Punkte" waere in dem Fall falsch, und   */
+/* zwar unauffaellig falsch.                                           */
+/*                                                                     */
+/* KEINE Bewertung: was zu wenig ist, haengt am Druckweg. 150 dpi sind  */
+/* fuer einen Bueroausdruck reichlich und fuer eine Druckerei zu wenig. */
+/* Das Werkzeug nennt die Zahl, die Entscheidung bleibt beim Leser.     */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumImagesCmd(ClientData cd, Tcl_Interp *interp,
+                int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
+        return TCL_ERROR;
+    int pagenum;
+    if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
+        return TCL_ERROR;
+
+    FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+    FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
+    if (!page) PDFIUM_ERROR(interp, "cannot load page");
+
+    Tcl_Obj *result = Tcl_NewListObj(0, NULL);
+    int n = FPDFPage_CountObjects(page);
+    for (int i = 0; i < n; i++) {
+        FPDF_PAGEOBJECT o = FPDFPage_GetObject(page, i);
+        if (!o) continue;
+        if (FPDFPageObj_GetType(o) != FPDF_PAGEOBJ_IMAGE) continue;
+
+        FPDF_IMAGEOBJ_METADATA md;
+        memset(&md, 0, sizeof(md));
+        if (!FPDFImageObj_GetImageMetadata(o, page, &md)) continue;
+
+        Tcl_Obj *d = Tcl_NewListObj(0, NULL);
+#define IMG_PUT(k, v) do { \
+            Tcl_ListObjAppendElement(interp, d, Tcl_NewStringObj((k), -1)); \
+            Tcl_ListObjAppendElement(interp, d, (v)); \
+        } while (0)
+        IMG_PUT("index",  Tcl_NewIntObj(i));
+        float l, u, r, t;
+        Tcl_Obj *box = Tcl_NewListObj(0, NULL);
+        if (FPDFPageObj_GetBounds(o, &l, &u, &r, &t)) {
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(l));
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(u));
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(r));
+            Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(t));
+        }
+        IMG_PUT("box",    box);
+        IMG_PUT("width",  Tcl_NewWideIntObj((Tcl_WideInt)md.width));
+        IMG_PUT("height", Tcl_NewWideIntObj((Tcl_WideInt)md.height));
+        IMG_PUT("dpix",   Tcl_NewDoubleObj(md.horizontal_dpi));
+        IMG_PUT("dpiy",   Tcl_NewDoubleObj(md.vertical_dpi));
+        IMG_PUT("bpp",    Tcl_NewIntObj((int)md.bits_per_pixel));
+        IMG_PUT("mcid",   Tcl_NewIntObj(md.marked_content_id));
+#undef IMG_PUT
+        Tcl_ListObjAppendElement(interp, result, d);
+    }
+    FPDF_ClosePage(page);
+    Tcl_SetObjResult(interp, result);
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::pageobjects doc-handle pagenum ?-marks 0|1?                 */
 /*                                                                     */
 /* Woraus besteht die Seite? Liefert je Objekt                          */
 /*   {index typ {links unten rechts oben}}                             */
@@ -1013,8 +2441,9 @@ static int
 PdfiumPageObjectsCmd(ClientData cd, Tcl_Interp *interp,
                      int objc, Tcl_Obj *const objv[])
 {
-    if (objc != 3) {
-        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle pagenum");
+    if (objc < 3 || (objc % 2) == 0) {
+        Tcl_WrongNumArgs(interp, 1, objv,
+                "doc-handle pagenum ?-marks 0|1? ?-fonts 0|1?");
         return TCL_ERROR;
     }
     Tcl_WideInt ptr;
@@ -1023,6 +2452,22 @@ PdfiumPageObjectsCmd(ClientData cd, Tcl_Interp *interp,
     int pagenum;
     if (Tcl_GetIntFromObj(interp, objv[2], &pagenum) != TCL_OK)
         return TCL_ERROR;
+
+    int wantMarks = 0;
+    int wantFonts = 0;
+    for (int i = 3; i + 1 < objc; i += 2) {
+        const char *opt = Tcl_GetString(objv[i]);
+        int *ziel;
+        if (strcmp(opt, "-marks") == 0)      { ziel = &wantMarks; }
+        else if (strcmp(opt, "-fonts") == 0) { ziel = &wantFonts; }
+        else {
+            Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+                "unknown option \"%s\": must be -marks or -fonts", opt));
+            return TCL_ERROR;
+        }
+        if (Tcl_GetIntFromObj(interp, objv[i+1], ziel) != TCL_OK)
+            return TCL_ERROR;
+    }
 
     FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
     FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
@@ -1057,6 +2502,80 @@ PdfiumPageObjectsCmd(ClientData cd, Tcl_Interp *interp,
             Tcl_ListObjAppendElement(interp, box, Tcl_NewDoubleObj(t));
         }
         Tcl_ListObjAppendElement(interp, e, box);
+        /* SCHRIFT je Textobjekt -- nur bei -fonts, damit die
+         * Rueckgabe nicht fuer jeden waechst, der nur Rechtecke will.
+         *
+         * {name groesse eingebettet flags}. Beim Nachbauen eines
+         * fremden Vordrucks die entscheidende Auskunft: mit welcher
+         * Schrift und in welcher Groesse steht da etwas. Und fuer
+         * readorder/overlaps eine bessere Grundlage als das blosse
+         * Rechteck -- eine 6-Punkt-Zeile und eine Ueberschrift sehen
+         * als Rechteck gleich aus.
+         *
+         * "eingebettet" ist die Frage, die ueber Portabilitaet
+         * entscheidet: eine nicht eingebettete Schrift sieht auf einer
+         * anderen Maschine anders aus, und das faellt erst dort auf.
+         */
+        if (wantFonts) {
+            Tcl_Obj *fi = Tcl_NewListObj(0, NULL);
+            if (FPDFPageObj_GetType(o) == FPDF_PAGEOBJ_TEXT) {
+                FPDF_FONT fo = FPDFTextObj_GetFont(o);
+                char nm[128];
+                nm[0] = 0;
+                if (fo) {
+                    size_t got = FPDFFont_GetBaseFontName(fo, nm, sizeof(nm));
+                    if (got == 0 || got > sizeof(nm)) nm[0] = 0;
+                }
+                Tcl_ListObjAppendElement(interp, fi,
+                        Tcl_NewStringObj(nm, -1));
+                float fs = 0.0f;
+                FPDFTextObj_GetFontSize(o, &fs);
+                Tcl_ListObjAppendElement(interp, fi, Tcl_NewDoubleObj(fs));
+                Tcl_ListObjAppendElement(interp, fi, Tcl_NewIntObj(
+                        (fo && FPDFFont_GetIsEmbedded(fo) == 1) ? 1 : 0));
+                Tcl_ListObjAppendElement(interp, fi, Tcl_NewIntObj(
+                        fo ? FPDFFont_GetFlags(fo) : 0));
+            }
+            /* Bei einem Pfad oder Bild bleibt die Liste LEER und nicht
+             * weg -- sonst muesste der Aufrufer die Laenge je Art
+             * unterscheiden. */
+            Tcl_ListObjAppendElement(interp, e, fi);
+        }
+        if (wantMarks) {
+            /* Die NAMEN der Marked-Content-Marken, in denen das Objekt
+             * liegt -- "Artifact", "OC", "P" und so fort.
+             *
+             * Nur die Namen: die Parameter kommen bei "OC" als Typ 0
+             * zurueck (gemessen 05.09.2026), also sagt pdfium zwar,
+             * DASS ein Objekt in einer Ebene liegt, aber nicht in
+             * welcher. Der Name allein reicht fuer die Frage, um die es
+             * hier geht: ist dieser Text ein Artefakt -- also Kopfzeile
+             * oder Seitenzahl, die ein Vorleseprogramm ueberspringen
+             * soll -- oder einfach nicht ausgezeichnet? Beides hat
+             * keine MCID, und ohne den Namen sind sie nicht zu
+             * unterscheiden.
+             */
+            Tcl_Obj *marks = Tcl_NewListObj(0, NULL);
+            int mc = FPDFPageObj_CountMarks(o);
+            for (int k = 0; k < mc; k++) {
+                FPDF_PAGEOBJECTMARK mk = FPDFPageObj_GetMark(o, k);
+                if (!mk) continue;
+                unsigned short buf[128];
+                unsigned long len = 0;
+                if (!FPDFPageObjMark_GetName(mk, buf, sizeof(buf), &len))
+                    continue;
+                /* GetName liefert UTF-16; die Namen sind ASCII. */
+                char nm[128];
+                unsigned long j = 0;
+                for (unsigned long q = 0; q < len / 2 && j < sizeof(nm) - 1; q++) {
+                    nm[j++] = (char)buf[q];
+                }
+                nm[j] = 0;
+                Tcl_ListObjAppendElement(interp, marks,
+                        Tcl_NewStringObj(nm, -1));
+            }
+            Tcl_ListObjAppendElement(interp, e, marks);
+        }
         Tcl_ListObjAppendElement(interp, result, e);
     }
     FPDF_ClosePage(page);
@@ -1612,69 +3131,178 @@ PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
     FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
     if (!page) PDFIUM_ERROR(interp, "cannot load page");
 
+    /* UEBER DIE FORMULAR-SCHNITTSTELLE, nicht ueber das Annotations-
+     * woerterbuch.
+     *
+     * Bis hierher wurden /T, /V und /FT mit FPDFAnnot_GetStringValue
+     * direkt am Widget gelesen. Das trifft den haeufigen Fall -- Feld
+     * und Widget in einem Objekt --, aber nicht den, in dem sie am
+     * VATER stehen und vom Widget nur geerbt werden (ISO 32000-1
+     * 12.7.3.1). Gemessen an einem Formular mit einem Feld und zwei
+     * Widgets:
+     *
+     *     {widget {} {}} {widget {} {}}
+     *
+     * Typ, Name und Wert leer -- und ohne jede Meldung. Bei einem
+     * verschachtelten Namen kam "city" statt "person.city".
+     *
+     * FPDFAnnot_GetFormField* loest die Vererbung auf und setzt den
+     * vollen Namen zusammen. Dafuer braucht es ein FPDF_FORMHANDLE.
+     */
+    FPDF_FORMFILLINFO ffi;
+    memset(&ffi, 0, sizeof(ffi));
+    ffi.version = 1;
+    FPDF_FORMHANDLE form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
+    if (form) FORM_OnAfterLoadPage(page, form);
+
     int n = FPDFPage_GetAnnotCount(page);
     Tcl_Obj *result = Tcl_NewListObj(0, NULL);
 
     for (int i = 0; i < n; i++) {
         FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, i);
         if (!annot) continue;
-
-        FPDF_ANNOTATION_SUBTYPE subtype = FPDFAnnot_GetSubtype(annot);
-        if (subtype != FPDF_ANNOT_WIDGET) {
+        if (FPDFAnnot_GetSubtype(annot) != FPDF_ANNOT_WIDGET) {
             FPDFPage_CloseAnnot(annot);
             continue;
         }
 
-        /* Feldname */
-        unsigned long nlen = FPDFAnnot_GetStringValue(annot, "T", NULL, 0);
-        unsigned short *nbuf = (unsigned short *)ckalloc(nlen + 2);
-        FPDFAnnot_GetStringValue(annot, "T", nbuf, nlen);
-        int nnchars = (int)((nlen / 2) - 1);
-        if (nnchars < 0) nnchars = 0;
-        Tcl_Obj *name = _AnnotUtf16ToObj(interp, (unsigned short *)nbuf, (unsigned long)nlen);
-        ckfree((char *)nbuf);
-
-        /* Feldwert */
-        unsigned long vlen = FPDFAnnot_GetStringValue(annot, "V", NULL, 0);
-        Tcl_Obj *value;
-        if (vlen > 0) {
-            unsigned short *vbuf = (unsigned short *)ckalloc(vlen + 2);
-            FPDFAnnot_GetStringValue(annot, "V", vbuf, vlen);
-            int vnchars = (int)((vlen / 2) - 1);
-            if (vnchars < 0) vnchars = 0;
-            value = _AnnotUtf16ToObj(interp, (unsigned short *)vbuf, (unsigned long)vlen);
-            ckfree((char *)vbuf);
-        } else {
-            value = Tcl_NewStringObj("", 0);
-        }
-
-        /* Feldtyp aus FT-Eintrag des Annotation-Dicts */
+        Tcl_Obj *name  = Tcl_NewStringObj("", 0);
+        Tcl_Obj *value = Tcl_NewStringObj("", 0);
+        int flags = 0;
         const char *typstr = "widget";
-        unsigned long ftlen = FPDFAnnot_GetStringValue(annot, "FT", NULL, 0);
-        if (ftlen > 0) {
-            unsigned short *ftbuf =
-                (unsigned short *)ckalloc(ftlen + 2);
-            FPDFAnnot_GetStringValue(annot, "FT", ftbuf, ftlen);
-            char ft[16] = {0};
-            for (int k = 0; k < 15 && ftbuf[k]; k++)
-                ft[k] = (char)(ftbuf[k] & 0xFF);
-            ckfree((char *)ftbuf);
-            if      (strcmp(ft, "Tx")  == 0) typstr = "text";
-            else if (strcmp(ft, "Btn") == 0) typstr = "button";
-            else if (strcmp(ft, "Ch")  == 0) typstr = "choice";
-            else if (strcmp(ft, "Sig") == 0) typstr = "signature";
+        int fftyp = -1;
+
+        if (form) {
+            unsigned long nlen =
+                FPDFAnnot_GetFormFieldName(form, annot, NULL, 0);
+            if (nlen > 2) {
+                unsigned short *nb = (unsigned short *)ckalloc(nlen);
+                FPDFAnnot_GetFormFieldName(form, annot, nb, nlen);
+                name = _AnnotUtf16ToObj(interp, nb, nlen);
+                ckfree((char *)nb);
+            }
+            unsigned long vlen =
+                FPDFAnnot_GetFormFieldValue(form, annot, NULL, 0);
+            if (vlen > 2) {
+                unsigned short *vb = (unsigned short *)ckalloc(vlen);
+                FPDFAnnot_GetFormFieldValue(form, annot, vb, vlen);
+                value = _AnnotUtf16ToObj(interp, vb, vlen);
+                ckfree((char *)vb);
+            }
+            flags = FPDFAnnot_GetFormFieldFlags(form, annot);
+            fftyp = FPDFAnnot_GetFormFieldType(form, annot);
+            /* Die Namen der Konstanten sind fest, die Werte nicht --
+             * das steht so in fpdf_formfill.h. Darum ueber die Namen
+             * und nicht ueber Zahlen. */
+            switch (fftyp) {
+                case FPDF_FORMFIELD_PUSHBUTTON:  typstr = "pushbutton"; break;
+                case FPDF_FORMFIELD_CHECKBOX:    typstr = "checkbox";   break;
+                case FPDF_FORMFIELD_RADIOBUTTON: typstr = "radiobutton";break;
+                case FPDF_FORMFIELD_COMBOBOX:    typstr = "combobox";   break;
+                case FPDF_FORMFIELD_LISTBOX:     typstr = "listbox";    break;
+                case FPDF_FORMFIELD_TEXTFIELD:   typstr = "text";       break;
+                case FPDF_FORMFIELD_SIGNATURE:   typstr = "signature";  break;
+                default:                         typstr = "unknown";    break;
+            }
         }
 
         Tcl_Obj *entry = Tcl_NewListObj(0, NULL);
         Tcl_ListObjAppendElement(interp, entry,
-                                 Tcl_NewStringObj(typstr, -1));
+                Tcl_NewStringObj(typstr, -1));
         Tcl_ListObjAppendElement(interp, entry, name);
         Tcl_ListObjAppendElement(interp, entry, value);
+        Tcl_ListObjAppendElement(interp, entry, Tcl_NewIntObj(flags));
+        /* Das Rechteck gehoert dazu: wer ein Feld anklicken oder
+         * hervorheben will, braucht es, und es zweimal zu holen waere
+         * ein zweiter Weg zu denselben Zahlen. Wie ueberall
+         * {links unten rechts oben}. */
+        FS_RECTF r;
+        Tcl_Obj *rect = Tcl_NewListObj(0, NULL);
+        if (FPDFAnnot_GetRect(annot, &r)) {
+            Tcl_ListObjAppendElement(interp, rect, Tcl_NewDoubleObj(r.left));
+            Tcl_ListObjAppendElement(interp, rect, Tcl_NewDoubleObj(r.bottom));
+            Tcl_ListObjAppendElement(interp, rect, Tcl_NewDoubleObj(r.right));
+            Tcl_ListObjAppendElement(interp, rect, Tcl_NewDoubleObj(r.top));
+        }
+        Tcl_ListObjAppendElement(interp, entry, rect);
+
+        /* AUSWAHLFELDER: die erlaubten Werte mitgeben.
+         *
+         * Bis hierher meldete formfields "combobox" oder "listbox" und
+         * verschwieg, WELCHE Werte gehen. Wer eines fuellen wollte,
+         * musste raten -- eine Auskunft, die halb ist, ist schlechter
+         * als eine, die fehlt: man haelt sie fuer vollstaendig.
+         *
+         * Je Eintrag {index label gewaehlt}. Der Index gehoert dazu,
+         * weil er beim Setzen gebraucht wird und weil zwei Eintraege
+         * dieselbe Beschriftung tragen duerfen.
+         *
+         * Bei allen anderen Feldarten bleibt die Liste LEER und nicht
+         * etwa weg: eine Rueckgabe, die je nach Feldart verschieden
+         * lang ist, zwingt jeden Aufrufer zu einer Fallunterscheidung.
+         */
+        Tcl_Obj *opts = Tcl_NewListObj(0, NULL);
+        if (form && (fftyp == FPDF_FORMFIELD_COMBOBOX
+                  || fftyp == FPDF_FORMFIELD_LISTBOX)) {
+            int oc = FPDFAnnot_GetOptionCount(form, annot);
+            for (int k = 0; k < oc; k++) {
+                Tcl_Obj *one = Tcl_NewListObj(0, NULL);
+                Tcl_ListObjAppendElement(interp, one, Tcl_NewIntObj(k));
+                unsigned long ll =
+                    FPDFAnnot_GetOptionLabel(form, annot, k, NULL, 0);
+                if (ll > 2) {
+                    unsigned short *lb = (unsigned short *)ckalloc(ll);
+                    FPDFAnnot_GetOptionLabel(form, annot, k, lb, ll);
+                    Tcl_ListObjAppendElement(interp, one,
+                            _AnnotUtf16ToObj(interp, lb, ll));
+                    ckfree((char *)lb);
+                } else {
+                    Tcl_ListObjAppendElement(interp, one,
+                            Tcl_NewStringObj("", 0));
+                }
+                Tcl_ListObjAppendElement(interp, one, Tcl_NewIntObj(
+                        FPDFAnnot_IsOptionSelected(form, annot, k) ? 1 : 0));
+                Tcl_ListObjAppendElement(interp, opts, one);
+            }
+        }
+        Tcl_ListObjAppendElement(interp, entry, opts);
+
+        /* /TU -- der Name FUER MENSCHEN.
+         *
+         * Ein Betrachter zeigt ihn als Erklaerung an, wenn der Zeiger
+         * ueber dem Feld steht. In einer Feldliste steht damit
+         * "Empfaenger, Name und Anschrift" statt "f_kunde_2" -- bei
+         * einem fremden Frachtbrief der Unterschied zwischen bedienbar
+         * und Raetselraten.
+         *
+         * LEER, wenn die Datei keinen traegt. Dann bleibt der
+         * technische Name die einzige Auskunft, und das soll man
+         * sehen, statt ihn hier stillschweigend zu wiederholen: eine
+         * Verdopplung sieht aus wie eine Erklaerung und ist keine.
+         */
+        Tcl_Obj *alt = Tcl_NewStringObj("", 0);
+        if (form) {
+            unsigned long al =
+                FPDFAnnot_GetFormFieldAlternateName(form, annot, NULL, 0);
+            if (al > 2) {
+                unsigned short *ab = (unsigned short *)ckalloc(al);
+                FPDFAnnot_GetFormFieldAlternateName(form, annot, ab, al);
+                Tcl_DecrRefCount(alt);
+                alt = _AnnotUtf16ToObj(interp, ab, al);
+                ckfree((char *)ab);
+            }
+        }
+        Tcl_ListObjAppendElement(interp, entry, alt);
+
         Tcl_ListObjAppendElement(interp, result, entry);
 
         FPDFPage_CloseAnnot(annot);
     }
 
+    if (form) {
+        FORM_OnBeforeClosePage(page, form);
+        FPDFDOC_ExitFormFillEnvironment(form);
+    }
     FPDF_ClosePage(page);
     Tcl_SetObjResult(interp, result);
     return TCL_OK;
@@ -3188,12 +4816,44 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumRotationCmd,   NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::search",
                          PdfiumSearchCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::images",
+                         PdfiumImagesCmd,      NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::pageobjects",
                          PdfiumPageObjectsCmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::charboxes",
                          PdfiumCharBoxesCmd,   NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::flatten",
                          PdfiumFlattenCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::catalog",
+                         PdfiumCatalogCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::editbegin",
+                         PdfiumEditBeginCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::editclick",
+                         PdfiumEditClickCmd,     NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::editchar",
+                         PdfiumEditCharCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::editkey",
+                         PdfiumEditKeyCmd,       NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::editrender",
+                         PdfiumEditRenderCmd,    NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::editend",
+                         PdfiumEditEndCmd,       NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::formfill",
+                         PdfiumFormFillCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::addannot",
+                         PdfiumAddAnnotCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::delannot",
+                         PdfiumDelAnnotCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::signatures",
+                         PdfiumSignaturesCmd,    NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::attachments",
+                         PdfiumAttachmentsCmd,   NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::attachment",
+                         PdfiumAttachmentCmd,    NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::addattachment",
+                         PdfiumAddAttachmentCmd, NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::delattachment",
+                         PdfiumDelAttachmentCmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::links",
                          PdfiumLinksCmd,      NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::structure",

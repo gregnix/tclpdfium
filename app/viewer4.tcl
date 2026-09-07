@@ -36,13 +36,19 @@ frame .tb -relief raised -bd 1
 button .tb.open  -text "Öffnen"   -command cmd_open
 button .tb.prev  -text "◀"         -command cmd_prev
 button .tb.next  -text "▶"         -command cmd_next
-label  .tb.info  -textvariable state(pageinfo) -width 16
+label  .tb.info  -textvariable state(seiteninfo) -width 12 -anchor w
 label  .tb.dpi_l -text "DPI:"
 spinbox .tb.dpi  -from 72 -to 600 -increment 50 \
                  -textvariable state(dpi) -width 5 \
                  -command cmd_refresh
 button .tb.panel -text "Info ▶◀"  -command cmd_toggle_panel
 button .tb.text  -text "Text"     -command cmd_showtext
+# Der Knopf schaltet nichts EIN -- die Sitzung laeuft von selbst. Er
+# beendet sie, wenn jemand sie loswerden will (etwa um mit der Maus zu
+# markieren, ohne in ein Feld zu geraten).
+button .tb.tippen -text "Tippen aus"  -command {
+    if {$state(edit) eq ""} { tippenAn } else { tippenAus }
+}
 label  .tb.such_l -text "Suchen:"
 entry  .tb.such   -textvariable state(suchtext) -width 14
 button .tb.suchall -text "alle Seiten" -command cmd_suchen_alle
@@ -54,7 +60,7 @@ button .tb.ql    -text "QL"       -command cmd_print_ql
 
 pack .tb.open .tb.prev .tb.next .tb.info \
      .tb.dpi_l .tb.dpi .tb.panel \
-     .tb.text .tb.such_l .tb.such .tb.suchall .tb.druck \
+     .tb.text .tb.tippen .tb.such_l .tb.such .tb.suchall .tb.druck \
      .tb.fest .tb.print .tb.ql \
      -side left -padx 3 -pady 3
 
@@ -210,16 +216,28 @@ scrollbar .pw.right.nb.form.sb -orient vertical \
     -command {.pw.right.nb.form.tv yview}
 ttk::treeview .pw.right.nb.form.tv \
     -yscrollcommand {.pw.right.nb.form.sb set} \
-    -columns {type value} \
-    -displaycolumns {type value} \
+    -columns {type value seite box id} \
+    -displaycolumns {type value id} \
     -show {tree headings} \
-    -selectmode none
+    -selectmode browse
 .pw.right.nb.form.tv heading #0    -text "Name"
 .pw.right.nb.form.tv heading type  -text "Typ"
 .pw.right.nb.form.tv heading value -text "Wert"
 .pw.right.nb.form.tv column  type  -width 60  -stretch 0
 .pw.right.nb.form.tv column  value -width 120 -stretch 1
+.pw.right.nb.form.tv heading id -text "Feldname"
+.pw.right.nb.form.tv column  id -width 90 -stretch 0
 
+# Ein Klick zeigt, WO das Feld liegt; ein Doppelklick fuellt es.
+#
+# Das Rechteck kommt seit pdfiumtcl 0.6.3 mit "formfields" -- vorher
+# waere es ein zweiter Weg zu denselben Zahlen gewesen.
+bind .pw.right.nb.form.tv <<TreeviewSelect>> ::demo_formSelect
+bind .pw.right.nb.form.tv <Double-1> ::demo_formFill
+ttk::button .pw.right.nb.form.save -text "Gefuellt speichern..." \
+    -command ::demo_formSave
+
+pack .pw.right.nb.form.save -side bottom -fill x -padx 4 -pady 4
 pack .pw.right.nb.form.sb -side right -fill y
 pack .pw.right.nb.form.tv -side left  -fill both -expand 1
 
@@ -227,7 +245,21 @@ pack .pw.right.nb.form.tv -side left  -fill both -expand 1
 .pw add .pw.left  -stretch always
 .pw add .pw.right -stretch never
 
+# EINE STATUSZEILE UNTEN, ueber die ganze Breite.
+#
+# Vorher stand die Meldung als "label -width 16" MITTEN IN DER
+# WERKZEUGLEISTE, zwischen den Knoepfen. "Schreibmarke gesetzt --
+# tippen" kam dort als "eibmarke gesetzt -- ti" an: vorn und hinten
+# abgeschnitten, dazwischen die DPI-Auswahl.
+#
+# Gemeldet mit einem Bildschirmfoto am 06.09.2026. Ich habe heute ein
+# Dutzend Meldungen geschrieben und keine davon je vollstaendig gesehen
+# -- alle Texte waren fuer eine Zeile gedacht, die es nicht gab.
+label .status -textvariable state(pageinfo) -anchor w -relief sunken \
+    -borderwidth 1 -padx 4
+
 pack .tb -side top  -fill x
+pack .status -side bottom -fill x
 pack .pw -side top  -fill both -expand 1
 
 # Tastatur
@@ -242,6 +274,19 @@ bind .pw.left.c <Control-MouseWheel> {
 }
 bind .pw.left.c <Control-Button-4> { cmd_zoom_in  }
 bind .pw.left.c <Control-Button-5> { cmd_zoom_out }
+# Ein Klick waehlt das Feld, ein Doppelklick fuellt es -- dieselbe
+# Geste wie in der Liste, nur auf der Seite.
+bind .pw.left.c <Button-1> {
+    if {$state(edit) ne ""} { tippenKlick %x %y } else { canvasKlick %x %y }
+}
+bind .pw.left.c <Double-1> {
+    if {$state(edit) eq ""} { canvasKlick %x %y ; ::demo_formFill }
+}
+bind .pw.left.c <Key> {
+    if {$state(edit) ne ""} { tippenTaste %K %A ; break }
+}
+# Der Canvas muss den Fokus nehmen koennen, sonst kommt keine Taste an.
+.pw.left.c configure -takefocus 1
 bind .pw.left.c <Button-4> { .pw.left.c yview scroll -3 units }
 bind .pw.left.c <Button-5> { .pw.left.c yview scroll  3 units }
 
@@ -249,6 +294,10 @@ bind .pw.left.c <Button-5> { .pw.left.c yview scroll  3 units }
 # Befehle                                                             #
 # ------------------------------------------------------------------ #
 proc cmd_open {} {
+    # Erst die Sitzung schliessen: sie zeigt auf ein Dokument, das
+    # gleich zugemacht wird. Eine Sitzung auf einem geschlossenen
+    # Dokument stuerzt beim naechsten Tastendruck ab.
+    tippenAus 1
     global state
     set f [tk_getOpenFile \
         -title "PDF öffnen" \
@@ -384,16 +433,48 @@ proc update_info_panel {} {
     set ftv .pw.right.nb.form.tv
     $ftv delete [$ftv children {}]
 
+    set feldZahl 0
     for {set p 0} {$p < $state(total)} {incr p} {
         set fields [pdfium::formfields $state(doc) $p]
+        incr feldZahl [llength $fields]
         foreach f $fields {
             set typ  [lindex $f 0]
             set name [lindex $f 1]
             set val  [lindex $f 2]
+            # Den Namen FUER MENSCHEN zeigen, wenn die Datei einen
+            # traegt: "Empfaenger, Name und Anschrift" statt
+            # "f_kunde_2". Der technische Name bleibt daneben stehen --
+            # ihn zu verstecken hiesse, dem Aufrufer die Auskunft zu
+            # nehmen, mit der er das Feld ansprechen muss.
+            set anzeige $name
+            set tu [lindex $f 6]
+            if {$tu ne "" && $tu ne $name} { set anzeige $tu }
+            # Seite und Rechteck werden mitgefuehrt, aber nicht
+            # angezeigt: sie sind fuer den Klick da, nicht fuer das Auge.
             $ftv insert {} end \
-                -text $name \
-                -values [list $typ $val]
+                -text $anzeige \
+                -values [list $typ $val $p [lindex $f 4] $name]
         }
+    }
+
+    # DIE ZAHL IN DEN REITER, und bei einem Formular ohne Lesezeichen
+    # gleich hinblaettern.
+    #
+    # Vorher standen die Felder da und niemand sah sie: der Viewer
+    # oeffnet auf "Lesezeichen", und wer nicht weiss, dass es einen
+    # Reiter "Formular" gibt, haelt das Dokument fuer nicht ausfuellbar.
+    # Gemeldet am 06.09.2026 -- die Liste war gefuellt, der Reiter
+    # unsichtbar.
+    if {$feldZahl > 0} {
+        .pw.right.nb tab .pw.right.nb.form -text " Formular ($feldZahl) "
+        # Nur wenn nichts anderes anzubieten ist: ein Dokument mit
+        # Lesezeichen soll dort aufgehen, wo sein Verfasser es gemeint
+        # hat. Ungefragt umzuschalten waere sonst eine Bevormundung.
+        if {![llength [.pw.right.nb.bm.tree children {}]]} {
+            .pw.right.nb select .pw.right.nb.form
+        }
+    } else {
+        .pw.right.nb tab .pw.right.nb.form -text " Formular "
     }
 }
 
@@ -439,6 +520,446 @@ proc update_info_panel {} {
 # dieselbe Sache waeren zwei Gelegenheiten, sich zu vertun -- und eine #
 # davon faellt spaeter auf als die andere.                             #
 # ------------------------------------------------------------------ #
+# Ein Formularfeld anklicken: hinblaettern und umranden.
+# Nach update_info_panel ist die Feldliste NEU AUFGEBAUT -- die alte
+# Auswahl zeigt dann auf einen geloeschten Eintrag. Wer danach noch
+# einmal doppelklickt, trifft ins Leere: beim zweiten Anlauf blieb das
+# Kaestchen angekreuzt und die Statuszeile zeigte die ALTE Meldung.
+# Gemessen 06.09.2026.
+#
+# Wiedergefunden wird ueber Name UND Seite: ein Name kann auf mehreren
+# Seiten vorkommen, und dann waere die Zeile sonst geraten.
+proc ::demo_reselect {name seite} {
+    set tv .pw.right.nb.form.tv
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq $name && [$tv set $id seite] eq $seite} {
+            $tv selection set $id
+            $tv see $id
+            return
+        }
+    }
+}
+
+proc ::demo_formSelect {} {
+    global state
+    set tv .pw.right.nb.form.tv
+    set sel [$tv selection]
+    .pw.left.c delete feldmark
+    if {$sel eq ""} return
+    set p [$tv set $sel seite]
+    if {![string is integer -strict $p]} return
+    if {$p != $state(page)} {
+        set state(page) $p
+        show_page
+    }
+    set box [$tv set $sel box]
+    if {[llength $box] == 4} { markiere_box $box feldmark "#008000" }
+}
+
+# Ein Formularfeld ausfuellen.
+#
+# Ueber "pdfium::formfill", also ueber PDFiums Formularumgebung: die
+# baut den Appearance-Strom selbst neu. Wer nur /V setzte, haette den
+# Wert in der Datei und nicht auf dem Papier.
+#
+# Das GEOEFFNETE Dokument wird dabei im Speicher geaendert. Gespeichert
+# wird erst auf Nachfrage -- und in eine NEUE Datei, damit die Vorlage
+# bleibt.
+proc ::demo_formFill {} {
+    global state
+    set tv .pw.right.nb.form.tv
+    set sel [$tv selection]
+    if {$sel eq ""} return
+    # Der TECHNISCHE Name, nicht der angezeigte: formfill spricht das
+    # Feld ueber /T an, und /TU ist nur Beschriftung.
+    set name [$tv set $sel id]
+    set typ  [$tv set $sel type]
+    set p    [$tv set $sel seite]
+    # Ein Kaestchen wird UMGESCHALTET, nicht beschrieben. Es hat einen
+    # Zustand und keinen Wert -- ein Eingabefeld dafuer zu oeffnen waere
+    # eine Frage nach etwas, das es nicht gibt.
+    #
+    # Ein Optionsfeld laesst sich nicht abwaehlen: in einer Gruppe ist
+    # immer eines gewaehlt. Es wird darum nur GESETZT.
+    if {$typ in {checkbox radiobutton}} {
+        set jetztAn [expr {[$tv set $sel value] ni {Off {} 0}}]
+        set soll [expr {$typ eq "radiobutton" ? 1 : !$jetztAn}]
+        if {$typ eq "radiobutton" && $jetztAn} {
+            set state(pageinfo) \
+                "\"$name\" ist schon gewaehlt -- ein Optionsfeld laesst\
+                sich nicht abwaehlen"
+            return
+        }
+        if {[catch {pdfium::formfill $state(doc) $p [list $name $soll]} e]} {
+            tk_messageBox -icon error -message "Umschalten: $e"
+            return
+        }
+        update_info_panel
+        demo_reselect $name $p
+        show_page
+        set state(pageinfo) "\"$name\" [expr {$soll ? {angekreuzt}\
+                : {abgewaehlt}}] -- noch nicht gespeichert"
+        return
+    }
+    if {$typ ni {text combobox}} {
+        tk_messageBox -icon info -title "Ausfuellen" -message \
+            "\"$name\" ist ein $typ und laesst sich hier nicht ausfuellen.\
+\n\nText- und Kombinationsfelder nehmen einen Wert, Ankreuz- und\
+ Optionsfelder einen Zustand -- eine Schaltflaeche oder Signatur\
+ keines von beidem."
+        return
+    }
+    set alt [$tv set $sel value]
+    set neu [demo_fragText "Feld \"$name\"" $alt]
+    if {$neu eq ""} return
+    if {[catch {pdfium::formfill $state(doc) $p [list $name $neu]} e]} {
+        tk_messageBox -icon error -message "Ausfuellen: $e"
+        return
+    }
+    update_info_panel
+    demo_reselect $name $p
+    show_page
+    set state(pageinfo) "\"$name\" gefuellt -- noch nicht gespeichert"
+}
+
+# Ein kleiner Eingabedialog. tk_getString gibt es nicht, und einen
+# eigenen Toplevel dafuer zu bauen ist weniger Arbeit als eine
+# Fremdabhaengigkeit.
+# Das gefuellte Dokument sichern.
+#
+# In eine NEUE Datei, und derselbe Name wird abgelehnt: die Vorlage soll
+# bleiben. Dasselbe Muster wie beim Festschreiben.
+proc ::demo_formSave {} {
+    global state
+    if {$state(doc) eq ""} return
+    set aus [tk_getSaveFile -title "Gefuelltes Formular speichern unter" \
+            -defaultextension .pdf \
+            -initialfile [file rootname [file tail $state(file)]]-gefuellt.pdf \
+            -filetypes {{PDF {.pdf}} {Alle *}}]
+    if {$aus eq ""} return
+    if {[file normalize $aus] eq [file normalize $state(file)]} {
+        tk_messageBox -icon error -message \
+            "Bitte einen anderen Namen: die Vorlage soll bleiben."
+        return
+    }
+    # VOR dem Speichern den Fokus abgeben.
+    #
+    # PDFium schreibt den Feldinhalt erst beim FOKUSVERLUST ins
+    # Dokument. Wer waehrend einer offenen Sitzung speichert, verliert
+    # sonst genau das zuletzt Getippte -- gemessen:
+    #
+    #   im Dokument waehrend der Sitzung:  "Muster GmbH"
+    #   in der gespeicherten Datei:        "Muster GmbH"
+    #   nach editend im Speicher:          "Muster GmbHVreden"
+    #
+    # Der Wert stand in der Sitzung und nicht im Dokument. Auf dem
+    # Bildschirm war er zu sehen -- das ist das Tueckische daran.
+    #
+    # Die Sitzung wird danach wieder aufgesetzt, damit man weitertippen
+    # kann: sie zu beenden waere richtig und unbequem.
+    set warEdit [expr {$state(edit) ne ""}]
+    if {$warEdit} { tippenAus 1 }
+    if {[catch {pdfium::save $state(doc) $aus} e]} {
+        tk_messageBox -icon error -message "Speichern: $e"
+        if {$warEdit} { tippenAn 1 }
+        return
+    }
+    if {$warEdit} { tippenAn 1 }
+    set state(pageinfo) "Geschrieben: [file tail $aus]"
+}
+
+proc ::demo_fragText {titel vorgabe} {
+    set w .frage
+    catch {destroy $w}
+    toplevel $w
+    wm title $w $titel
+    wm transient $w .
+    set ::demo_frageWert $vorgabe
+    set ::demo_frageOk 0
+    ttk::label $w.l -text $titel
+    ttk::entry $w.e -textvariable ::demo_frageWert -width 40
+    ttk::frame $w.b
+    ttk::button $w.b.ok  -text "Uebernehmen" \
+        -command {set ::demo_frageOk 1 ; destroy .frage}
+    ttk::button $w.b.ab  -text "Abbrechen" \
+        -command {set ::demo_frageOk 0 ; destroy .frage}
+    pack $w.b.ok $w.b.ab -side left -padx 4
+    pack $w.l -padx 8 -pady {8 2} -anchor w
+    pack $w.e -padx 8 -pady 2 -fill x
+    pack $w.b -padx 8 -pady 8
+    bind $w.e <Return> {set ::demo_frageOk 1 ; destroy .frage}
+    bind $w <Escape>   {set ::demo_frageOk 0 ; destroy .frage}
+    $w.e selection range 0 end
+
+    # ERST darstellen lassen, DANN greifen.
+    #
+    # "grab" verlangt ein dargestelltes Fenster. Direkt nach dem
+    # Erzeugen ist es das noch nicht, und Tk meldet
+    #
+    #     grab failed: window not viewable
+    #
+    # Gemeldet am 06.09.2026. Auf einer schnellen Maschine geht es
+    # manchmal gut -- das ist das Schlimmste daran, denn dann faellt es
+    # erst beim Benutzer auf.
+    #
+    # "update" und nicht "tkwait visibility": letzteres ist die
+    # Lehrbuchform, kehrt aber ohne Fenstermanager NIE zurueck -- ohne
+    # X-Sitzung gemessen, das Programm blieb haengen. Ein Haenger statt
+    # einer Fehlermeldung ist der schlechtere Tausch.
+    update
+    focus $w.e
+    # Und selbst danach kann der Griff scheitern, wenn ein anderes
+    # Fenster ihn haelt. Kein Grund, den Dialog nicht zu zeigen -- er
+    # ist dann eben nicht modal.
+    if {[catch {grab $w}]} {
+        # Ohne Griff muss wenigstens die Tastatur hier landen.
+        focus -force $w.e
+    }
+    tkwait window $w
+    if {!$::demo_frageOk} { return "" }
+    return $::demo_frageWert
+}
+
+# Canvas-Pixel zurueck in Seitenkoordinaten.
+#
+# Die Gegenrichtung zu markiere_box, und mit DENSELBEN Zahlen: Massstab
+# aus dem Bild, y gespiegelt. Zwei Rechnungen fuer dieselbe Umrechnung
+# gingen auseinander, und dann traefe der Klick knapp daneben -- was man
+# fuer ein zu kleines Feld hielte statt fuer einen Rechenfehler.
+proc pixelZuPunkt {cx cy} {
+    global state
+    lassign [pdfium::pagesize $state(doc) $state(page)] wmm hmm
+    set wpt [expr {$wmm * 72.0 / 25.4}]
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    if {$wpt <= 0 || $hpt <= 0} { return {} }
+    set sx [expr {[image width  pdfpage] / $wpt}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    if {$sx <= 0 || $sy <= 0} { return {} }
+    return [list [expr {$cx / $sx}] [expr {$hpt - $cy / $sy}]]
+}
+
+# ---------------------------------------------------------------------
+# Tippmodus: direkt in die Seite schreiben
+# ---------------------------------------------------------------------
+#
+# Waehrend einer Sitzung bleiben Formularumgebung UND Seite offen --
+# Fokus und Schreibmarke sind Zustand, und der ist nach jedem Aufruf
+# weg. Darum ein eigener Modus mit sichtbarem Anfang und Ende, statt
+# ihn stillschweigend im Hintergrund zu halten.
+#
+# Beendet wird beim Umblaettern, beim Schliessen und auf Escape: eine
+# Sitzung, die man vergisst, haelt eine Seite offen und schreibt den
+# zuletzt getippten Wert nicht fest.
+set state(edit) ""
+set state(seiteninfo) ""
+
+# Die Sitzung laeuft, sobald die Seite Formularfelder hat -- ohne Knopf.
+#
+# Andere Betrachter haben keinen "Tippmodus": man klickt hinein und
+# schreibt. Ein Modus, den man erst einschalten muss, ist eine Huerde vor
+# einer Selbstverstaendlichkeit -- und wer ihn nicht findet, haelt das
+# Dokument fuer nicht ausfuellbar. Genau das ist heute schon einmal
+# passiert, mit dem Reiter "Formular".
+#
+# Auf einer Seite OHNE Felder entsteht keine Sitzung: sie haette nichts
+# zu tun und hielte nur eine Seite offen.
+proc tippenAn {{still 0}} {
+    global state
+    if {$state(doc) eq "" || $state(edit) ne ""} return
+    if {![llength [pdfium::formfields $state(doc) $state(page)]]} return
+    if {[catch {pdfium::editbegin $state(doc) $state(page)} h]} {
+        if {!$still} { tk_messageBox -icon error -message "Tippen: $h" }
+        return
+    }
+    set state(edit) $h
+    .pw.left.c configure -cursor xterm
+    focus .pw.left.c
+    if {!$still} {
+        set state(pageinfo) "Ins Feld klicken und schreiben; Tab zum\
+                naechsten Feld."
+    }
+}
+
+proc tippenAus {{still 0}} {
+    global state
+    if {$state(edit) eq ""} return
+    # editend gibt den Fokus ab, und PDFium schreibt den Feldinhalt beim
+    # Fokusverlust fest. Ohne das ginge das zuletzt getippte Feld
+    # verloren -- genau das, an dem man gerade gearbeitet hat.
+    catch {pdfium::editend $state(edit)}
+    set state(edit) ""
+    .pw.left.c configure -cursor {}
+    update_info_panel
+    show_page
+    if {!$still} {
+        set state(pageinfo) "Tippmodus beendet -- noch nicht gespeichert"
+    }
+}
+
+proc tippenKlick {wx wy} {
+    global state
+    # DEN TASTATURFOKUS HOLEN.
+    #
+    # Ein Canvas bekommt ihn beim Anklicken NICHT von selbst -- anders
+    # als ein Eingabefeld. "focus" stand nur beim Aufsetzen der Sitzung;
+    # wer danach einmal in die Feldliste geklickt hatte, war ihn los und
+    # bekam ihn nie zurueck.
+    #
+    # Gemeldet am 06.09.2026 mit drei Bildschirmfotos: die Statuszeile
+    # sagte "Schreibmarke gesetzt -- tippen", und es liess sich nichts
+    # eingeben. Die Marke SASS, nur kam keine Taste an.
+    focus .pw.left.c
+    set cx [.pw.left.c canvasx $wx]
+    set cy [.pw.left.c canvasy $wy]
+    set pt [pixelZuPunkt $cx $cy]
+    if {![llength $pt]} return
+    lassign $pt px py
+    if {![pdfium::editclick $state(edit) $px $py]} {
+        # KEIN Treffer -- dann wenigstens den alten Weg anbieten.
+        #
+        # Bis hierher endete es mit "Dort liegt kein Feld", und damit war
+        # auch die Auswahl ueber die Feldliste nicht mehr per Klick
+        # erreichbar: der Tippweg hatte den anderen verdraengt. Wer also
+        # aus irgendeinem Grund nicht getroffen wurde, konnte gar nichts
+        # mehr anklicken.
+        #
+        # canvasKlick rechnet mit DENSELBEN Zahlen, prueft aber gegen die
+        # Rechtecke aus "formfields" statt gegen PDFiums Trefferpruefung.
+        # Gehen die beiden auseinander, sieht man es an der Meldung --
+        # und das ist eine Auskunft und keine Sackgasse.
+        canvasKlick $wx $wy
+        set tv .pw.right.nb.form.tv
+        if {[llength [$tv selection]]} {
+            set state(pageinfo) "\"[$tv set [$tv selection] id]\"\
+                    gewaehlt -- PDFium hat dort nicht getroffen;\
+                    Doppelklick in der Liste fuellt es"
+        } else {
+            set state(pageinfo) [format \
+                "Dort liegt kein Feld (Seitenpunkt %.1f / %.1f)" $px $py]
+        }
+        return
+    }
+    # Reihenfolge ist jetzt gleichgueltig: der Seitenzaehler steht in
+    # "seiteninfo", die Meldung in "pageinfo". Vorher teilten sie sich
+    # eine Variable, und show_page hat jede Meldung ueberschrieben.
+    # Und zeigen, WO die Marke sitzt. Ohne Markierung sieht der Klick
+    # aus, als sei nichts passiert -- auf dem Bildschirmfoto war das
+    # Feld nach dem Klick nicht zu unterscheiden von vorher.
+    tippenZeichnen
+    tippenMarkieren $px $py
+    set state(pageinfo) "Schreibmarke gesetzt -- tippen; Tab zum naechsten"
+}
+
+proc tippenTaste {keysym zeichen} {
+    global state
+    switch -- $keysym {
+        Escape    { tippenAus ; return }
+        Tab       { pdfium::editkey $state(edit) tab }
+        ISO_Left_Tab { pdfium::editkey $state(edit) tab }
+        BackSpace { pdfium::editkey $state(edit) back }
+        Delete    { pdfium::editkey $state(edit) del }
+        Left      { pdfium::editkey $state(edit) left }
+        Right     { pdfium::editkey $state(edit) right }
+        Home      { pdfium::editkey $state(edit) home }
+        End       { pdfium::editkey $state(edit) end }
+        default   {
+            # Nur druckbare Zeichen weiterreichen. Umschalt, Strg und
+            # die Funktionstasten liefern ein leeres %A -- die als
+            # Zeichen zu senden hiesse, Steuertasten in den Text zu
+            # schreiben.
+            if {$zeichen eq "" || [string is control -strict $zeichen]} return
+            pdfium::editchar $state(edit) $zeichen
+        }
+    }
+    tippenZeichnen
+}
+
+# Neu zeichnen, waehrend getippt wird.
+#
+# Ueber den gewoehnlichen Weg: die Seite wird ohnehin mit -forms
+# gerendert, und PDFium zeichnet den Feldinhalt aus derselben Umgebung,
+# in der getippt wird. Ein eigener Renderpfad waere ein zweiter Weg zu
+# demselben Bild.
+proc tippenZeichnen {} {
+    global state
+    # UEBER DIE SITZUNG zeichnen, nicht ueber show_page.
+    #
+    # "render -forms 1" baut sich eine EIGENE Formularumgebung auf und
+    # kennt den Sitzungszustand nicht -- also auch nicht, was gerade
+    # getippt und noch nicht festgeschrieben ist. Gemessen: drei Zeichen
+    # getippt, das Bild blieb bei 1406 dunklen Punkten; erst nach dem
+    # Beenden 1503.
+    #
+    # Man tippte blind. Wer nicht sieht, was er schreibt, kann es auch
+    # nicht berichtigen.
+    if {$state(edit) eq ""} { show_page ; return }
+    if {[catch {pdfium::editrender $state(edit) -dpi $state(dpi) \
+            -imagename pdfpage}]} {
+        show_page
+        return
+    }
+    .pw.left.c delete all
+    .pw.left.c create image 0 0 -anchor nw -image pdfpage
+    .pw.left.c configure -scrollregion \
+        [list 0 0 [image width pdfpage] [image height pdfpage]]
+}
+
+# Das Feld umranden, in dem die Marke sitzt.
+#
+# Gesucht wird ueber die Rechtecke aus der Feldliste -- dieselbe Quelle
+# wie bei der Auswahl in der Liste, also dieselbe Markierung und keine
+# zweite Rechnung.
+proc tippenMarkieren {px py} {
+    global state
+    .pw.left.c delete feldmark
+    set tv .pw.right.nb.form.tv
+    foreach id [$tv children {}] {
+        if {[$tv set $id seite] ne $state(page)} continue
+        set box [$tv set $id box]
+        if {[llength $box] != 4} continue
+        lassign $box l u r o
+        if {$px >= $l && $px <= $r && $py >= $u && $py <= $o} {
+            markiere_box $box feldmark "#008000"
+            return
+        }
+    }
+}
+
+# Ein Klick auf die Seite: liegt dort ein Formularfeld?
+#
+# Die Canvas-Koordinaten muessen durch canvasx/canvasy -- ein
+# gescrolltes Bild liegt sonst um den Scrollbetrag daneben, und das
+# faellt erst auf, wenn jemand weit unten klickt.
+proc canvasKlick {wx wy} {
+    global state
+    if {$state(doc) eq ""} return
+    set cx [.pw.left.c canvasx $wx]
+    set cy [.pw.left.c canvasy $wy]
+    set pt [pixelZuPunkt $cx $cy]
+    if {![llength $pt]} return
+    lassign $pt px py
+
+    set tv .pw.right.nb.form.tv
+    foreach id [$tv children {}] {
+        if {[$tv set $id seite] ne $state(page)} continue
+        set box [$tv set $id box]
+        if {[llength $box] != 4} continue
+        lassign $box l u r o
+        if {$px >= $l && $px <= $r && $py >= $u && $py <= $o} {
+            # Auswaehlen loest ueber <<TreeviewSelect>> schon die
+            # Markierung aus -- nicht noch einmal von Hand malen.
+            .pw.right.nb select .pw.right.nb.form
+            $tv selection set $id
+            $tv see $id
+            return
+        }
+    }
+    # Kein Treffer: die Markierung wegnehmen, sonst zeigt sie auf ein
+    # Feld, das der Benutzer gar nicht mehr meint.
+    .pw.left.c delete feldmark
+    $tv selection set {}
+}
+
 proc markiere_box {box tag farbe {fuellung ""}} {
     global state
     lassign $box links unten rechts oben
@@ -502,7 +1023,7 @@ proc cmd_flatten {} {
         pdfium::save $state(doc) $aus
     } err]} {
         tk_messageBox -icon error -message "Festschreiben: $err"
-        set state(pageinfo) "Seite [expr {$state(page)+1}] / $state(total)"
+        set state(seiteninfo) "Seite [expr {$state(page)+1}] / $state(total)"
         return
     }
     # Das GEOEFFNETE Dokument ist jetzt im Speicher veraendert. Wer
@@ -561,7 +1082,7 @@ proc cmd_suchen {} {
     global state
     .pw.left.c delete treffer
     if {$state(doc) eq "" || [string trim $state(suchtext)] eq ""} {
-        set state(pageinfo) "Seite [expr {$state(page)+1}] / $state(total)"
+        set state(seiteninfo) "Seite [expr {$state(page)+1}] / $state(total)"
         return
     }
     if {[catch {
@@ -584,13 +1105,29 @@ proc cmd_suchen {} {
     if {$n == 0} { bell }
 }
 
+# Nach dem Zeichnen die Sitzung fuer DIESE Seite aufsetzen.
+#
+# Eine Sitzung gilt fuer genau eine Seite. Sie beim Blaettern
+# mitzunehmen hiesse, auf einer Seite zu tippen und eine andere
+# anzusehen.
+proc tippenNachziehen {} {
+    global state
+    if {$state(doc) eq "" || $state(edit) ne ""} return
+    after idle {catch {tippenAn 1}}
+}
+
 proc show_page {} {
     global state
     if {$state(doc) eq ""} return
 
     set p $state(page)
     set n $state(total)
-    set state(pageinfo) "Seite [expr {$p+1}] / $n"
+    # Der reine Zaehler gehoert in die Werkzeugleiste, Meldungen in die
+    # Statuszeile. Vorher teilten sie sich eine Variable, und jede
+    # Meldung wurde vom naechsten Seitenaufbau ueberschrieben -- das war
+    # der Grund, warum ich "Schreibmarke gesetzt" nach dem Zeichnen
+    # setzen musste. Zwei Dinge, zwei Variablen.
+    set state(seiteninfo) "Seite [expr {$p+1}] / $n"
 
     # Rendern: Bild heißt immer "pdfpage"
     #
@@ -625,11 +1162,13 @@ proc show_page {} {
     # ehrlicher als stehenlassen, aber unbequem.
     if {[string trim $state(suchtext)] ne ""} { cmd_suchen }
     update_aufbau
+    tippenNachziehen
 }
 
 proc cmd_prev {} {
     global state
     if {$state(doc) eq "" || $state(page) == 0} return
+    tippenAus 1
     incr state(page) -1
     show_page
 }
@@ -638,6 +1177,11 @@ proc cmd_next {} {
     global state
     if {$state(doc) eq ""} return
     if {$state(page) >= $state(total) - 1} return
+    # Eine Sitzung gilt fuer GENAU EINE Seite -- sie ueber den
+    # Seitenwechsel mitzunehmen hiesse, auf einer Seite zu tippen und
+    # eine andere anzusehen. Und der zuletzt getippte Wert wird beim
+    # Fokusverlust festgeschrieben, also muss sie sauber enden.
+    tippenAus 1
     incr state(page)
     show_page
 }
