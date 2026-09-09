@@ -50,6 +50,7 @@ proc ::pdfview {win args} {
             -page 0
             -zoom fit
             -dpi 150
+            -forms 1
             -background white
             -pagechangedcommand ""
         }
@@ -155,6 +156,12 @@ proc ::pdfview {win args} {
                     set opt(-zoom) $v
                     set lastFit ""
                     set needRender 1
+                }
+                -forms {
+                    if {![string is boolean -strict $v]} {
+                        error "pdfview: -forms expects a boolean, got \"$v\""
+                    }
+                    set opt(-forms) [expr {$v ? 1 : 0}]
                 }
                 -dpi {
                     if {![string is integer -strict $v] || $v <= 0} {
@@ -271,6 +278,17 @@ proc ::pdfview {win args} {
             if {$page < 0 || $page >= $total} { return }
 
             set ropts [my RenderOptions $page]
+            # FORMULARE MITZEICHNEN, es sei denn, jemand sagt Nein.
+            #
+            # Ohne "-forms 1" fehlen die Widget-Anmerkungen: ein
+            # eingebettetes Formular kam leer heraus, waehrend
+            # app/viewer4.tcl dieselbe Datei mit Feldern zeigte. Wer
+            # einbettet, will dasselbe sehen wie im Viewer.
+            #
+            # Abschaltbar, weil es Geld kostet: die Formularschicht baut
+            # eine Umgebung auf und zeichnet ein zweites Mal ueber die
+            # Seite.
+            if {$opt(-forms)} { lappend ropts -forms 1 }
             if {[catch {pdfium::render $doc $page {*}$ropts -imagename $img} err]} {
                 # Not silent: a page that cannot be drawn is a fact the
                 # caller wants to see.

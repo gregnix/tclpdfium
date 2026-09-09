@@ -1,6 +1,6 @@
 # pdfiumtcl API Reference
 
-Version: 0.6.3
+Version: 0.6.4
 
 ---
 
@@ -342,17 +342,21 @@ foreach bm [pdfium::bookmarks $doc] {
 pdfium::formfields doc-handle pagenum
 ```
 
-Returns a list of AcroForm fields on the page.
-Each entry is `{type name value}`.
-
-Field types: `text` `button` `choice` `signature` `widget`
+Returns a list of AcroForm fields on the page. **See the full
+description further down** -- an entry has eight elements since 0.6.4,
+and the field types were split in 0.6.3.
 
 ```tcl
 foreach field [pdfium::formfields $doc 0] {
-    lassign $field type name value
+    lassign $field type name value flags rect options description apLength
     puts "$type  $name  = $value"
 }
 ```
+
+This short block said `{type name value}` and listed `button` and
+`choice` as types until 0.6.4 -- both were true two releases earlier.
+Two descriptions of the same command in one document, and only one of
+them maintained.
 
 ---
 
@@ -542,7 +546,16 @@ pdfium::formfields doc-handle pagenum
 ```
 
 One entry per widget:
-`{type name value flags {left bottom right top} options description}`.
+`{type name value flags {left bottom right top} options description
+apLength}`.
+
+`apLength` is the size of the field's appearance stream, **0 when there
+is none**. It answers the most common puzzle with forms: the field is
+there, `formfields` names a value, and nothing is visible. `/V` and
+`/AP` are separate things in PDF (ISO 32000-1 12.5.5) -- one is the
+value, the other says what it looks like. Without this figure one hunts
+the fault in the binding, the render path or the callbacks; that cost
+half a day on 2026-09-07.
 
 `description` is the field's `/TU` -- the text a viewer shows as a
 tooltip. A field list can then read "Empfänger, Name und Anschrift"
@@ -639,6 +652,18 @@ allowed: {Artikel A} {Artikel B} {Artikel C} Sonderbestellung)}
 
 `editkey` gained `up` and `down` for the same reason.
 
+**A field on several pages gets the appearance copied.** PDFium rebuilds
+the appearance stream only for the widget the focus was on; the other
+widgets keep whatever they had, and without `/NeedAppearances` a viewer
+may legitimately use it. Measured: the parent held the value, page 1
+showed it after flattening and page 2 stayed empty. Neither one call per
+page nor `flatten -forms` helped -- the value is already set, so there
+is nothing for PDFium to rebuild.
+
+The copy only happens between widgets of the **same size**: the stream
+is computed against its widget's box, and on a differently sized field
+the text would sit wrong. A size mismatch is reported, not passed over.
+
 A field with several widgets -- the carbon set -- is filled by one call:
 PDFium joins field and widgets itself.
 
@@ -652,6 +677,89 @@ after, and they survive flattening.
 The current state is read first rather than clicking blindly: a click on
 an already ticked box would clear it, and "set to yes" would have done
 the opposite.
+
+**One form environment per document.** There is exactly one call to
+`FPDFDOC_InitFormFillEnvironment` in the whole module. Until 0.6.4 every
+call -- `render`, `formfields`, `formfill`, `flatten`, `editbegin` --
+built its own and tore it down again.
+
+`render` and `editrender` still show different things, and that is
+correct: PDFium commits a field on **focus loss**. During a session the
+field still carries the old value while `editrender` draws the edit in
+progress, caret included. Measured: `Muster GmbH` during, `Muster
+GmbHXYZ` after `editend`. PDFium allows only one per document: the
+second saw no fields, and `formfill` reported *"could not fill"* for a
+name that was perfectly correct. The environment now belongs to the
+document, is built on first use and released by `pdfium::close`, so
+filling during an open typing session works.
+
+Releasing it there is not merely tidiness: PDFium happily hands out the
+**same address** for a new document, and a stale entry would then point
+at freed memory. Measured -- the first run typed, the second on a freshly
+opened file did not, and the click still reported a hit.
+
+### pdfium::formcheck
+
+```tcl
+pdfium::formcheck doc-handle ?pagenum?
+```
+
+What is **suspicious** about this form -- not what is in it. Returns a
+list of `{code page field text}`; empty means nothing was found, and
+that should be visible rather than assumed.
+
+Reading and checking are two jobs. `formfields` has grown to eight
+elements and every further answer makes it harder to read; a second
+command that only reports findings keeps both small.
+
+| Code | Meaning |
+|------|---------|
+| `EMPTY_AP` | appearance stream of length 0 -- PDFium draws nothing, not even the border |
+| `VALUE_NO_AP` | the same, but the field carries a value: `formfields` names it and the viewer shows nothing |
+| `CHOICE_VALUE_INVALID` | a choice field's value is not among its options |
+
+**Only three codes, and each of them cost real time.** A draft listed
+fourteen; the other eleven were well-argued guesses. A code that no real
+file ever triggers never turns red, and nobody finds out whether it
+measures the right thing.
+
+**What this cannot tell you**, and therefore does not claim: a *missing*
+appearance stream is indistinguishable from an *empty* one through this
+binding. With no stream at all PDFium builds one, so the length comes
+back greater than zero -- measured on a file with zero `/AP`:
+`apLength` 75. Separating those two means reading the raw file, which
+would be a second source of truth.
+
+---
+
+**Clicks always reach PDFium**, and `editclick` answers with three
+values: `0` nothing there, `1` a field was hit, `2` no field but PDFium
+reacted anyway. The third is an entry in an open dropdown -- the caller
+needs to tell it apart, because after a choice the input is **finished**
+while PDFium only commits the value on focus loss. A caller that misses
+this keeps showing the empty field, and the user concludes it was not
+saved.
+
+`editclick` used to forward the mouse events only when a field sat at
+that point. A combo box's open list is
+drawn below the field, outside every widget rectangle, so clicking an
+entry did nothing at all. The return value is now "a field was there
+**or** PDFium asked for a redraw", which catches the list entry the hit
+test cannot see.
+
+**A radio group is named by its option.** A group shares one name; which
+option is meant is the widget's export value:
+
+```tcl
+pdfium::formfill $doc 0 {prio express}
+```
+
+Until 0.6.4 only a boolean was accepted, and that always selected the
+first widget -- `express` was not reachable, and the message *"prio" is
+a radio button and takes a boolean* pointed the caller the wrong way:
+the value was not wrong, the way was missing. An unknown option is
+reported with the permitted ones. A boolean still works, so existing
+calls keep going.
 
 A **radio button cannot be unset** -- one of a group is always
 selected -- so `0` on one is reported rather than quietly failing.
@@ -683,8 +791,44 @@ pdfium::editclick $s 100 497      ;# page coordinates, points
 pdfium::editchar  $s "Vreden"
 pdfium::editkey   $s tab          ;# tab|back|del|left|right|home|end
 pdfium::editrender $s -dpi 100 -imagename ::img
+pdfium::edittext  $s          ;# the text being typed, before commit
+pdfium::editstate $s          ;# what PDFium reported
 pdfium::editend   $s
 ```
+
+**The session implements PDFium's callbacks.** The header marks eight
+entries of `FPDF_FORMFILLINFO` as *Implementation Required: yes* --
+`FFI_Invalidate`, `SetCursor`, `SetTimer`, `KillTimer`, `GetLocalTime`,
+`GetPage`, `GetRotation`, `ExecuteNamedAction` -- and until 0.6.4 all of
+them were `NULL`. That works surprisingly often for a static
+`FPDF_FFLDraw`; for a viewer with focus and a caret it does not.
+
+`edittext` returns `{name text}` -- the field that has focus and the
+text **currently in it**, before it is committed. The name has to come
+with it: after a Tab the focus moves on while a selection in a list
+stays put, and a caller that only gets the text writes it into the wrong
+row. Measured -- the content of `f_menge` landed at the field the user
+had clicked last, and suddenly "the other fields had data too". PDFium only writes a field value on focus loss, so during
+typing `formfields` keeps reporting the old one -- after `f` and `g` the
+document still said `{}` while the screen showed `fg`. Giving up focus
+to read it would end the typing. Empty means no field has focus.
+
+    formfields  ->  what the document says
+    edittext    ->  what is being typed
+
+`editstate` hands back what PDFium reported: `dirty`, the `rect` to
+redraw, the `cursor` shape it asked for, and `changed`. Reading resets
+`dirty` -- a caller who forgets to would otherwise redraw forever.
+
+```
+after the click:  dirty 1  rect {79 500 231 518}  cursor 3
+```
+
+**The callbacks do not conjure an empty appearance into being.**
+Measured: a page with empty appearance streams draws exactly the same
+number of dark pixels with and without them. An empty `/AP` stays empty;
+whoever wants such fields visible has to paint the rectangles, as
+`app/viewer4.tcl` does.
 
 **Draw through `editrender`, not through `render -forms 1`.** The latter
 builds its own form environment, which knows nothing of the session --

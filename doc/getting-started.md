@@ -155,3 +155,29 @@ Key compatibility details in `generic/tclpdfiumtcl.c`:
 
 - [API Reference](api-reference.md) — all 26 commands
 - [README](../../README.md) — overview, install, examples
+
+## Forms: three questions, three commands
+
+When a form does not look the way you expect, ask in this order:
+
+```tcl
+pdfium::formfields $doc 0    ;# what is in the form
+pdfium::formcheck  $doc      ;# what is suspicious about it
+pdfium::edittext   $session  ;# what is being typed right now
+```
+
+`formfields` reports `/V` -- the value the *document* holds. During a
+typing session it keeps reporting the old one, because PDFium commits a
+field only on focus loss; `edittext` gives the text in the focused field
+before that. `formcheck` returns nothing when nothing is odd.
+
+The eighth element of a `formfields` entry is `apLength`. **Zero means
+the file does not say what the field looks like** -- PDFium then draws
+nothing, and the fault is in the document, not in the binding. That one
+number answers the most common form puzzle there is.
+
+For a whole file at once:
+
+```
+wish tools/katalog.tcl datei.pdf
+```

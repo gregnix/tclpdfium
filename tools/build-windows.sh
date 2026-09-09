@@ -165,7 +165,43 @@ done
 
 cp "$DLL" "$DIST/$SUB/"
 cp "$VENDOR/bin/pdfium.dll" "$DIST/$SUB/"
-cp pkgIndex.tcl "$DIST/$SUB/"
+
+# EINE PLATTFORMWACHE VOR DEN INDEX.
+#
+# Tcl durchsucht bei "auto_path" oder TCLLIBPATH die Unterordner EINE
+# Ebene tief und findet dabei jede pkgIndex.tcl. Wer den Projektordner
+# einhaengt, laedt darum die WINDOWS-DLL:
+#
+#   couldn't load .../build-win-tcl9/tcl9pdfiumtcl064.dll:
+#   invalid ELF header
+#
+# Die Meldung sagt nicht, woher die Datei kam, und der Ordner heisst
+# harmlos. Gemeldet 08.09.2026, und es war mindestens das zweite Mal.
+#
+# Die DLL ist unter Linux ohnehin nicht ladbar -- der Index darf also
+# gleich schweigen. "return" bricht das Einlesen dieser Datei ab und
+# laesst die uebrigen in Ruhe.
+{
+    echo "# Dieser Index gehoert zu einer WINDOWS-DLL. Anderswo schweigt er:"
+    echo "# ein Projektordner auf auto_path fand ihn sonst und meldete"
+    echo "# \"invalid ELF header\", ohne die Herkunft zu nennen."
+    echo 'if {$::tcl_platform(platform) ne "windows"} { return }'
+    echo ""
+    cat pkgIndex.tcl
+} > "$DIST/$SUB/pkgIndex.tcl"
+
+# Dasselbe im BAUORDNER -- dort lag die Falle, die gemeldet wurde.
+if [ -f "$BUILD/pkgIndex.tcl" ] ; then
+    if ! head -5 "$BUILD/pkgIndex.tcl" | grep -q "tcl_platform(platform)" ; then
+        {
+            echo "# Windows-Index, siehe dist-win."
+            echo 'if {$::tcl_platform(platform) ne "windows"} { return }'
+            echo ""
+            cat "$BUILD/pkgIndex.tcl"
+        } > "$BUILD/pkgIndex.tcl.neu"
+        mv "$BUILD/pkgIndex.tcl.neu" "$BUILD/pkgIndex.tcl"
+    fi
+fi
 
 echo
 echo "==> Fertig:"

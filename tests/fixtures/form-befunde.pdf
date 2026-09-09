@@ -1,0 +1,58 @@
+%PDF-1.7
+%והצח
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R 11 0 R]
+   /DR << /Font << /Helv 5 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]
+   /Resources << /Font << /Helv 5 0 R >> >>
+   /Contents 4 0 R /Annots [10 0 R 11 0 R] >>
+endobj
+4 0 obj
+<< /Length 56 >>
+stream
+BT /Helv 12 Tf 40 760 Td (Befunde fuer formcheck) Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Name /Helv >>
+endobj
+6 0 obj
+<< /BBox [0 0 200 16] /Resources 3 0 R /Subtype /Form /Type /XObject
+   /Length 0 >>
+stream
+
+endstream
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Widget /P 3 0 R /FT /Tx /T (mit_wert)
+   /V (Muster GmbH) /DA (/Helv 10 Tf 0 g) /Rect [120 700 320 716] /F 4
+   /AP << /N 6 0 R >> >>
+endobj
+11 0 obj
+<< /Type /Annot /Subtype /Widget /P 3 0 R /FT /Ch /T (falsche_wahl)
+   /Ff 131072 /Opt [(Eins) (Zwei)] /V (Drei) /DA (/Helv 10 Tf 0 g)
+   /Rect [120 660 320 676] /F 4 /AP << /N 6 0 R >> >>
+endobj
+xref
+0 7
+0000000000 65535 f 
+0000000015 00000 n 
+0000000141 00000 n 
+0000000198 00000 n 
+0000000356 00000 n 
+0000000462 00000 n 
+0000000544 00000 n 
+10 2
+0000000662 00000 n 
+0000000838 00000 n 
+trailer
+<< /Root 1 0 R /Size 12 >>
+startxref
+1043
+%%EOF

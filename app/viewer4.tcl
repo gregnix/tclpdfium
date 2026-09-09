@@ -216,8 +216,8 @@ scrollbar .pw.right.nb.form.sb -orient vertical \
     -command {.pw.right.nb.form.tv yview}
 ttk::treeview .pw.right.nb.form.tv \
     -yscrollcommand {.pw.right.nb.form.sb set} \
-    -columns {type value seite box id} \
-    -displaycolumns {type value id} \
+    -columns {type value seite box id options ap} \
+    -displaycolumns {type value id ap} \
     -show {tree headings} \
     -selectmode browse
 .pw.right.nb.form.tv heading #0    -text "Name"
@@ -227,6 +227,16 @@ ttk::treeview .pw.right.nb.form.tv \
 .pw.right.nb.form.tv column  value -width 120 -stretch 1
 .pw.right.nb.form.tv heading id -text "Feldname"
 .pw.right.nb.form.tv column  id -width 90 -stretch 0
+# DIE LAENGE DES ERSCHEINUNGSSTROMS, SICHTBAR.
+#
+# 0 heisst: die Datei sagt nicht, wie das Feld aussieht -- PDFium
+# zeichnet dann nichts, und man sucht den Fehler in der Bindung. Genau
+# das hat am 07./08.09.2026 einen halben Tag gekostet.
+#
+# Die Zahl gab es seit 0.6.4 in "formfields", nur sehen konnte man sie
+# nicht. Eine Diagnose, die man erst holen muss, holt niemand.
+.pw.right.nb.form.tv heading ap -text "AP"
+.pw.right.nb.form.tv column  ap -width 45 -stretch 0 -anchor e
 
 # Ein Klick zeigt, WO das Feld liegt; ein Doppelklick fuellt es.
 #
@@ -336,7 +346,113 @@ proc ask_password {filename} {
     return $::_pw_result
 }
 
+# ------------------------------------------------------------------
+# MITSCHNITT
+#
+# Was heute dreimal gefehlt hat, war nicht ein Test, sondern die
+# ANTWORT auf "welche Aufrufe hat der Benutzer ausgeloest". Eine
+# Fehlerbeschreibung in einem Satz laesst mir drei Deutungen; ein
+# Mitschnitt laesst mir keine.
+#
+# Einschalten ueber die Umgebung, damit man nichts umbaut:
+#
+#     VIEWER4_SPUR=/tmp/spur.txt wish app/viewer4.tcl datei.pdf
+#
+# Aufgezeichnet wird JEDER Aufruf an die Bindung mit seinen Argumenten
+# und seiner Antwort -- auch der Fehlerfall. Dazu die Klicks in
+# Fensterpunkten UND in Seitenpunkten: die Umrechnung dazwischen war
+# schon zweimal die eigentliche Frage.
+#
+# Was NICHT hineingehoert: Dateiinhalte. Ein Mitschnitt, den man nicht
+# weitergeben mag, wird nicht weitergegeben.
+# ------------------------------------------------------------------
+# Das Seitenmass, einmal je Seite.
+#
+# AUS EINEM MITSCHNITT, 08.09.2026: bei jedem Neuzeichnen stand
+# "pdfium::pagesize" sechzehnmal hintereinander -- einmal je Feld, weil
+# markiere_box es selbst holt und felderRahmen ueber alle Felder laeuft.
+#
+# Aufgefallen ist es niemandem: es war nicht falsch, nur verschwendet,
+# und im Betrieb sieht man den Unterschied nicht. Im Mitschnitt sieht
+# man ihn sofort -- das ist der Nebennutzen einer Spur.
+proc seitenmass {} {
+    global state
+    set schluessel "$state(doc),$state(page)"
+    if {[info exists state(mass,$schluessel)]} {
+        return $state(mass,$schluessel)
+    }
+    set m [pdfium::pagesize $state(doc) $state(page)]
+    set state(mass,$schluessel) $m
+    return $m
+}
+
+# Beim Dateiwechsel weg.
+#
+# Der Schluessel enthaelt das Dokument-Handle, also faellt ein neues
+# Dokument meist von selbst auf einen neuen Schluessel. VERLASSEN darf
+# man sich darauf nicht: PDFium vergibt fuer ein neues Dokument gern
+# dieselbe Adresse -- daran ist am 08.09.2026 schon die
+# Formularumgebung haengengeblieben, und der Klick meldete einen
+# Treffer, waehrend nichts ankam.
+#
+# Ein Mass, das nach dem Wechsel stehenbleibt, setzt jeden Rahmen an
+# die falsche Stelle.
+proc seitenmassVergessen {} {
+    global state
+    foreach n [array names state mass,*] { unset state($n) }
+}
+
+proc spurSchreib {zeile} {
+    global state
+    if {![info exists state(spurkanal)] || $state(spurkanal) eq ""} return
+    puts $state(spurkanal) [format "%s  %s" \
+            [clock format [clock seconds] -format %H:%M:%S] $zeile]
+    flush $state(spurkanal)
+}
+
+proc spurAn {datei} {
+    global state
+    if {[catch {open $datei w} ch]} {
+        return -code error "Mitschnitt: $ch"
+    }
+    fconfigure $ch -encoding utf-8
+    set state(spurkanal) $ch
+    # Jeden Befehl der Bindung umhuellen. Umbenennen statt einer
+    # Ausfuehrungsspur (trace execution): das laeuft in jeder Tcl-
+    # Fassung gleich und ist im Fehlerfall leichter zu lesen.
+    foreach cmd [info commands ::pdfium::*] {
+        set kurz [namespace tail $cmd]
+        if {[info commands ::pdfium::_echt_$kurz] ne ""} continue
+        rename $cmd ::pdfium::_echt_$kurz
+        proc $cmd {args} [format {
+            set rc [catch {::pdfium::_echt_%s {*}$args} aus]
+            spurSchreib [format "pdfium::%s %%s -> %%s%%s"                     [string range $args 0 200]                     [expr {$rc ? "FEHLER " : ""}]                     [string range $aus 0 200]]
+            if {$rc} { return -code error $aus }
+            return $aus
+        } $kurz $kurz]
+    }
+    spurSchreib "Mitschnitt an -- pdfiumtcl [package provide pdfiumtcl]"
+    return $datei
+}
+
+proc spurAus {} {
+    global state
+    if {![info exists state(spurkanal)] || $state(spurkanal) eq ""} return
+    spurSchreib "Mitschnitt aus"
+    close $state(spurkanal)
+    set state(spurkanal) ""
+}
+
 proc open_pdf {filename {password ""}} {
+    # ERST die Tippsitzung beenden.
+    #
+    # Sie haelt Seite und Formularumgebung des ALTEN Dokuments. Wird das
+    # geschlossen, ist sie tot -- state(edit) trug danach ein Handle,
+    # das beim naechsten Klick "this edit session is over" meldete.
+    #
+    # cmd_open tat das schon; open_pdf ist der zweite Eingang und tat es
+    # nicht. Zwei Wege ins selbe Haus, einer ohne Schloss.
+    tippenAus 1
     global state
     if {$state(doc) ne ""} {
         pdfium::close $state(doc)
@@ -354,6 +470,11 @@ proc open_pdf {filename {password ""}} {
         tk_messageBox -icon error -message "Fehler: $doc"
         return
     }
+    # Das Seitenmass des ALTEN Dokuments wegwerfen -- und zwar hier,
+    # nachdem das neue steht. Weiter oben gerufen blieb ein Eintrag
+    # zurueck, weil zwischen dem Loeschen und dem neuen Dokument noch
+    # gezeichnet wurde. Gemessen: zwei Eintraege statt einem.
+    seitenmassVergessen
     set state(doc)   $doc
     set state(file)  $filename
     set state(total) [pdfium::pagecount $doc]
@@ -383,6 +504,50 @@ proc cmd_toggle_panel {} {
     } else {
         .pw add .pw.right -stretch never
         set state(panel) 1
+    }
+}
+
+# Den Wert des Feldes, in dem gerade getippt wird, in der Liste
+# nachtragen.
+#
+# PDFium schreibt erst beim Fokusverlust fest -- "formfields" meldet
+# waehrend des Tippens weiter den ALTEN Wert. Im Mitschnitt vom
+# 08.09.2026 stand nach jedem Buchstaben wieder "f_name {}", bis ein Tab
+# kam. Auf dem Bildschirm sieht das aus, als komme nichts an.
+#
+# Den Fokus abzugeben waere falsch: dann koennte man nicht weitertippen.
+# FORM_GetFocusedText fragt PDFium direkt -- pdfium::edittext.
+proc laufendenWertNachtragen {} {
+    global state
+    if {$state(edit) eq ""} return
+    if {[catch {pdfium::edittext $state(edit)} paar]} return
+    lassign $paar feldname txt
+    # OHNE NAMEN NICHTS EINTRAGEN.
+    #
+    # Der erste Anlauf schrieb in die AUSGEWAEHLTE Zeile. Nach einem Tab
+    # wandert der Fokus aber, und die Auswahl bleibt stehen -- gemessen
+    # an einem Mitschnitt: "edittext -> 1" nach mehreren Tabs, der
+    # Inhalt von f_menge, eingetragen bei dem Feld, das der Benutzer
+    # zuletzt angeklickt hatte. Auf dem Bildschirm hatten "ploetzlich
+    # auch die anderen Felder Daten".
+    if {$feldname eq "" || $txt eq ""} return
+    set tv .pw.right.nb.form.tv
+    if {![winfo exists $tv]} return
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] ne $feldname} continue
+        if {[$tv set $id seite] ne $state(page)} continue
+        # NUR TIPPBARE FELDER.
+        #
+        # Eine Optionsgruppe teilt sich einen Namen: drei Zeilen heissen
+        # "prio". Der erste Treffer bekaeme den Eintrag, und ein leerer
+        # Text loeschte das "Off" -- gemessen: nach vier Tabs waren aus
+        # drei prio-Zeilen zwei geworden.
+        #
+        # Getippt wird nur in Text- und Kombinationsfeldern. Alles
+        # andere holt sich update_info_panel beim Festschreiben.
+        if {[$tv set $id type] ni {text combobox}} continue
+        $tv set $id value $txt
+        return
     }
 }
 
@@ -453,7 +618,8 @@ proc update_info_panel {} {
             # angezeigt: sie sind fuer den Klick da, nicht fuer das Auge.
             $ftv insert {} end \
                 -text $anzeige \
-                -values [list $typ $val $p [lindex $f 4] $name]
+                -values [list $typ $val $p [lindex $f 4] $name \
+                        [lindex $f 5] [lindex $f 7]]
         }
     }
 
@@ -565,6 +731,71 @@ proc ::demo_formSelect {} {
 # Das GEOEFFNETE Dokument wird dabei im Speicher geaendert. Gespeichert
 # wird erst auf Nachfrage -- und in eine NEUE Datei, damit die Vorlage
 # bleibt.
+# Die Sitzung fuer die Dauer eines Aufrufs aussetzen.
+#
+# NOETIG WAR DAS BIS 0.6.4: PDFium vertraegt nur EINE Formularumgebung
+# je Dokument, jeder Aufruf baute sich seine eigene, und solange die
+# Tippsitzung lief, fand formfill die Felder nicht. Seit die Umgebung
+# dem DOKUMENT gehoert, geht beides nebeneinander -- gemessen, formfill
+# waehrend einer offenen Sitzung fuellt.
+#
+# Die Pause bleibt trotzdem: sie gibt vor dem Fuellen den Fokus ab, und
+# PDFium schreibt den Feldinhalt beim Fokusverlust fest. Ohne sie ginge
+# ein halb getippter Wert verloren, sobald jemand daneben in der Liste
+# doppelklickt.
+proc mitPause {skript} {
+    global state
+    set war [expr {$state(edit) ne ""}]
+    if {$war} { tippenAus 1 }
+    set rc [catch {uplevel 1 $skript} e opts]
+    if {$war} { tippenAn 1 }
+    if {$rc} { return -options $opts $e }
+    return $e
+}
+
+# Eine Auswahl aus einer Liste. Kein Freitext.
+#
+# Der Viewer fragte bei einem Kombinationsfeld nach Text -- und eines
+# ohne Bearbeitungsflagge nimmt keinen. Die erlaubten Werte stehen seit
+# 0.6.3 in "formfields", man muss sie nur anbieten.
+proc demo_fragWahl {titel werte jetzt} {
+    set w .wahl
+    destroy $w
+    toplevel $w
+    wm title $w $titel
+    wm transient $w .
+    ttk::label $w.l -text $titel
+    listbox $w.lb -height [expr {min([llength $werte], 10)}] -width 30 \
+            -exportselection 0
+    foreach v $werte { $w.lb insert end $v }
+    set i [lsearch -exact $werte $jetzt]
+    if {$i >= 0} { $w.lb selection set $i ; $w.lb see $i }
+    ttk::frame $w.b
+    ttk::button $w.b.ok  -text "Waehlen" -command {set ::demo_wahlOk 1}
+    ttk::button $w.b.ab  -text "Abbruch" -command {set ::demo_wahlOk 0}
+    pack $w.b.ok $w.b.ab -side left -padx 4
+    pack $w.l -padx 8 -pady 6
+    pack $w.lb -padx 8 -fill both -expand 1
+    pack $w.b -pady 8
+    bind $w.lb <Double-1> {set ::demo_wahlOk 1}
+    bind $w <Escape> {set ::demo_wahlOk 0}
+    set ::demo_wahlOk 0
+    # ERST darstellen lassen, DANN greifen -- "grab" verlangt ein
+    # sichtbares Fenster, und "tkwait visibility" kehrt ohne
+    # Fenstermanager nie zurueck.
+    update
+    focus $w.lb
+    if {[catch {grab $w}]} { focus -force $w.lb }
+    tkwait variable ::demo_wahlOk
+    set aus ""
+    if {$::demo_wahlOk && [llength [$w.lb curselection]]} {
+        set aus [$w.lb get [lindex [$w.lb curselection] 0]]
+    }
+    catch {grab release $w}
+    destroy $w
+    return $aus
+}
+
 proc ::demo_formFill {} {
     global state
     set tv .pw.right.nb.form.tv
@@ -581,16 +812,47 @@ proc ::demo_formFill {} {
     #
     # Ein Optionsfeld laesst sich nicht abwaehlen: in einer Gruppe ist
     # immer eines gewaehlt. Es wird darum nur GESETZT.
-    if {$typ in {checkbox radiobutton}} {
-        set jetztAn [expr {[$tv set $sel value] ni {Off {} 0}}]
-        set soll [expr {$typ eq "radiobutton" ? 1 : !$jetztAn}]
-        if {$typ eq "radiobutton" && $jetztAn} {
-            set state(pageinfo) \
-                "\"$name\" ist schon gewaehlt -- ein Optionsfeld laesst\
-                sich nicht abwaehlen"
+    # EIN OPTIONSFELD: DIESE ZEILE, nicht der Gruppenname.
+    #
+    # Eine Gruppe teilt sich einen Namen. "formfill $name 1" trifft
+    # darum immer das ERSTE Widget -- Express und Overnight waren in
+    # form-gruppe.pdf nicht waehlbar, und nach Normal hiess es "schon
+    # gewaehlt".
+    #
+    # Die Feldliste fuehrt je Zeile ihr eigenes Rechteck. Ein Klick
+    # dorthin trifft genau dieses Widget. Die API konnte es laengst
+    # (basic.test 2.60 mit dem Exportwert) -- die Bedienung nicht, und
+    # kein Test sah es.
+    if {$typ eq "radiobutton"} {
+        set box [$tv set $sel box]
+        if {[llength $box] != 4} {
+            tk_messageBox -icon error -message \
+                    "\"$name\": kein Rechteck fuer diese Zeile"
             return
         }
-        if {[catch {pdfium::formfill $state(doc) $p [list $name $soll]} e]} {
+        lassign $box bl bu br bo
+        set war [expr {$state(edit) ne ""}]
+        if {!$war} { tippenAn 1 }
+        if {$state(edit) eq ""} {
+            tk_messageBox -icon error -message \
+                    "\"$name\": keine Sitzung fuer den Klick"
+            return
+        }
+        pdfium::editclick $state(edit) [expr {($bl + $br) / 2.0}] \
+                [expr {($bu + $bo) / 2.0}]
+        # Der Wert wird beim Fokusverlust festgeschrieben.
+        tippenAus 1
+        if {$war} { tippenAn 1 }
+        update_info_panel
+        demo_reselect $name $p
+        show_page
+        set state(pageinfo) "\"$name\" gewaehlt -- noch nicht gespeichert"
+        return
+    }
+    if {$typ eq "checkbox"} {
+        set jetztAn [expr {[$tv set $sel value] ni {Off {} 0}}]
+        set soll [expr {!$jetztAn}]
+        if {[catch {mitPause {pdfium::formfill $state(doc) $p [list $name $soll]}} e]} {
             tk_messageBox -icon error -message "Umschalten: $e"
             return
         }
@@ -601,7 +863,34 @@ proc ::demo_formFill {} {
                 : {abgewaehlt}}] -- noch nicht gespeichert"
         return
     }
-    if {$typ ni {text combobox}} {
+    # AUSWAHLFELDER: aus den Optionen waehlen, nicht tippen.
+    #
+    # "formfields" liefert sie seit 0.6.3 mit; die Feldliste zeigte sie
+    # nur nicht. Der Viewer fragte statt dessen nach Freitext -- und ein
+    # Kombinationsfeld ohne Bearbeitungsflagge nimmt keinen.
+    if {$typ in {combobox listbox}} {
+        set opts [$tv set $sel options]
+        if {![llength $opts]} {
+            tk_messageBox -icon info -message \
+                    "\"$name\" nennt keine Auswahlwerte."
+            return
+        }
+        set namen {}
+        foreach paar $opts { lappend namen [lindex $paar 1] }
+        set neu [demo_fragWahl "Feld \"$name\"" $namen [$tv set $sel value]]
+        if {$neu eq ""} return
+        if {[catch {mitPause {pdfium::formfill $state(doc) $p \
+                [list $name $neu]}} e]} {
+            tk_messageBox -icon error -message "Ausfuellen: $e"
+            return
+        }
+        update_info_panel
+        demo_reselect $name $p
+        show_page
+        set state(pageinfo) "\"$name\" auf \"$neu\" -- noch nicht gespeichert"
+        return
+    }
+    if {$typ ni {text}} {
         tk_messageBox -icon info -title "Ausfuellen" -message \
             "\"$name\" ist ein $typ und laesst sich hier nicht ausfuellen.\
 \n\nText- und Kombinationsfelder nehmen einen Wert, Ankreuz- und\
@@ -612,7 +901,7 @@ proc ::demo_formFill {} {
     set alt [$tv set $sel value]
     set neu [demo_fragText "Feld \"$name\"" $alt]
     if {$neu eq ""} return
-    if {[catch {pdfium::formfill $state(doc) $p [list $name $neu]} e]} {
+    if {[catch {mitPause {pdfium::formfill $state(doc) $p [list $name $neu]}} e]} {
         tk_messageBox -icon error -message "Ausfuellen: $e"
         return
     }
@@ -728,7 +1017,7 @@ proc ::demo_fragText {titel vorgabe} {
 # fuer ein zu kleines Feld hielte statt fuer einen Rechenfehler.
 proc pixelZuPunkt {cx cy} {
     global state
-    lassign [pdfium::pagesize $state(doc) $state(page)] wmm hmm
+    lassign [seitenmass] wmm hmm
     set wpt [expr {$wmm * 72.0 / 25.4}]
     set hpt [expr {$hmm * 72.0 / 25.4}]
     if {$wpt <= 0 || $hpt <= 0} { return {} }
@@ -751,6 +1040,10 @@ proc pixelZuPunkt {cx cy} {
 # Sitzung, die man vergisst, haelt eine Seite offen und schreibt den
 # zuletzt getippten Wert nicht fest.
 set state(edit) ""
+set state(spurkanal) ""
+# Der Bereich einer offenen Aufklappliste, in Seitenpunkten. Leer =
+# nichts offen. Siehe felderRahmen.
+set state(offeneliste) {}
 set state(seiteninfo) ""
 
 # Die Sitzung laeuft, sobald die Seite Formularfelder hat -- ohne Knopf.
@@ -814,7 +1107,67 @@ proc tippenKlick {wx wy} {
     set pt [pixelZuPunkt $cx $cy]
     if {![llength $pt]} return
     lassign $pt px py
-    if {![pdfium::editclick $state(edit) $px $py]} {
+    # Klick in BEIDEN Koordinaten: die Umrechnung war schon zweimal die
+    # eigentliche Frage.
+    spurSchreib [format "Klick Fenster %s/%s -> Seite %.1f/%.1f" \
+            $wx $wy $px $py]
+    set traf [pdfium::editclick $state(edit) $px $py]
+    # WAS PDFIUM NEU GEZEICHNET HABEN WILL.
+    #
+    # Ist die gemeldete Flaeche deutlich HOEHER als das Feld selbst, hat
+    # sich etwas aufgeklappt. Nur die Hoehe, nicht "irgendwas ist
+    # anders": nach jedem Tastendruck meldet PDFium ebenfalls einen
+    # Bereich, und der ist das Feld.
+    set state(offeneliste) {}
+    if {$traf} {
+        set zu [pdfium::editstate $state(edit)]
+        set r [dict get $zu rect]
+        if {[llength $r] == 4} {
+            lassign $r rl ru rr ro
+            # DIE HOEHE DES GEKLICKTEN FELDES, nicht die der Auswahl.
+            #
+            # Der erste Anlauf las sie aus der Feldliste. Wer direkt auf
+            # die Seite klickt, hat dort aber nichts ausgewaehlt -- dann
+            # blieb die Hoehe 0 und die Erkennung stumm. Gemeldet
+            # 08.09.2026, nachdem der Rahmen "immer noch drin" war.
+            #
+            # Gesucht wird das Feld, in dem der Klick LIEGT. Das ist
+            # dieselbe Auskunft, unabhaengig davon, was gerade markiert
+            # ist.
+            set feldhoehe 0
+            foreach e [pdfium::formfields $state(doc) $state(page)] {
+                set b [lindex $e 4]
+                if {[llength $b] != 4} continue
+                lassign $b bl bu br bo
+                if {$px >= $bl && $px <= $br && $py >= $bu && $py <= $bo} {
+                    set feldhoehe [expr {$bo - $bu}]
+                    break
+                }
+            }
+            if {$feldhoehe > 0 && $ro - $ru > $feldhoehe * 1.5} {
+                set state(offeneliste) $r
+            }
+        }
+    }
+    if {$traf == 2} {
+        # EIN EINTRAG IN EINER OFFENEN AUFKLAPPLISTE.
+        #
+        # Die Wahl ist damit fertig. PDFium schreibt den Wert aber erst
+        # beim FOKUSVERLUST fest -- ohne das zeigt die Feldliste weiter
+        # leer und die Seite den alten Stand, und es sieht aus, als
+        # waere nichts geschehen. Genau so gemeldet: gewaehlt, kurz
+        # sichtbar, dann wieder leer -- waehrend in der gespeicherten
+        # Datei der Wert stand.
+        # Die Liste ist zu.
+        set state(offeneliste) {}
+        tippenAus 1
+        tippenAn 1
+        update_info_panel
+        tippenZeichnen
+        set state(pageinfo) "gewaehlt -- noch nicht gespeichert"
+        return
+    }
+    if {!$traf} {
         # KEIN Treffer -- dann wenigstens den alten Weg anbieten.
         #
         # Bis hierher endete es mit "Dort liegt kein Feld", und damit war
@@ -830,9 +1183,35 @@ proc tippenKlick {wx wy} {
         canvasKlick $wx $wy
         set tv .pw.right.nb.form.tv
         if {[llength [$tv selection]]} {
+            # PDFium hat den Punkt nicht getroffen, das Rechteck aus der
+            # Feldliste aber schon. Dann NOCH EINMAL, in der MITTE des
+            # Feldes.
+            #
+            # Ein Optionsfeld ist zwoelf Punkt gross; wer knapp daneben
+            # trifft, liegt im Rechteck und ausserhalb dessen, was
+            # PDFium als Treffer gelten laesst. Gemessen: auf die Mitte
+            # geklickt trifft JEDES Feld der Demo.
+            #
+            # Nur zu melden waere richtig und unbrauchbar -- der Benutzer
+            # hat ja auf das Feld gezeigt.
+            set box [$tv set [$tv selection] box]
+            set gesetzt 0
+            if {[llength $box] == 4} {
+                lassign $box bl bu br bo
+                set gesetzt [pdfium::editclick $state(edit) \
+                        [expr {($bl + $br) / 2.0}] [expr {($bu + $bo) / 2.0}]]
+            }
+            if {$gesetzt} {
+                tippenZeichnen
+                tippenMarkieren [expr {($bl + $br) / 2.0}] \
+                        [expr {($bu + $bo) / 2.0}]
+                set state(pageinfo) "Schreibmarke in\
+                        \"[$tv set [$tv selection] id]\" -- tippen;\
+                        Tab zum naechsten"
+                return
+            }
             set state(pageinfo) "\"[$tv set [$tv selection] id]\"\
-                    gewaehlt -- PDFium hat dort nicht getroffen;\
-                    Doppelklick in der Liste fuellt es"
+                    gewaehlt -- Doppelklick in der Liste fuellt es"
         } else {
             set state(pageinfo) [format \
                 "Dort liegt kein Feld (Seitenpunkt %.1f / %.1f)" $px $py]
@@ -851,6 +1230,7 @@ proc tippenKlick {wx wy} {
 }
 
 proc tippenTaste {keysym zeichen} {
+    spurSchreib "Taste $keysym '[string map {\n \\n} $zeichen]'"
     global state
     switch -- $keysym {
         Escape    { tippenAus ; return }
@@ -858,6 +1238,8 @@ proc tippenTaste {keysym zeichen} {
         ISO_Left_Tab { pdfium::editkey $state(edit) tab }
         BackSpace { pdfium::editkey $state(edit) back }
         Delete    { pdfium::editkey $state(edit) del }
+        Up        { pdfium::editkey $state(edit) up }
+        Down      { pdfium::editkey $state(edit) down }
         Left      { pdfium::editkey $state(edit) left }
         Right     { pdfium::editkey $state(edit) right }
         Home      { pdfium::editkey $state(edit) home }
@@ -872,6 +1254,7 @@ proc tippenTaste {keysym zeichen} {
         }
     }
     tippenZeichnen
+    laufendenWertNachtragen
 }
 
 # Neu zeichnen, waehrend getippt wird.
@@ -884,11 +1267,14 @@ proc tippenZeichnen {} {
     global state
     # UEBER DIE SITZUNG zeichnen, nicht ueber show_page.
     #
-    # "render -forms 1" baut sich eine EIGENE Formularumgebung auf und
-    # kennt den Sitzungszustand nicht -- also auch nicht, was gerade
-    # getippt und noch nicht festgeschrieben ist. Gemessen: drei Zeichen
-    # getippt, das Bild blieb bei 1406 dunklen Punkten; erst nach dem
-    # Beenden 1503.
+    # "render -forms 1" zeigt den FESTGESCHRIEBENEN Stand, nicht den
+    # laufenden. PDFium schreibt einen Feldwert erst beim Fokusverlust
+    # fest. Gemessen: drei Zeichen getippt, das Bild blieb bei 1406
+    # dunklen Punkten; erst nach dem Beenden 1503.
+    #
+    # (Bis 0.6.4 baute render sich dafuer auch noch eine eigene
+    # Umgebung. Das ist vorbei -- es gibt eine je Dokument. Der Grund
+    # hier bleibt aber derselbe.)
     #
     # Man tippte blind. Wer nicht sieht, was er schreibt, kann es auch
     # nicht berichtigen.
@@ -902,6 +1288,15 @@ proc tippenZeichnen {} {
     .pw.left.c create image 0 0 -anchor nw -image pdfpage
     .pw.left.c configure -scrollregion \
         [list 0 0 [image width pdfpage] [image height pdfpage]]
+    felderRahmen
+    # Die Auswahl wieder drauf: "delete all" hat die gruene Marke mit
+    # weggenommen. Ohne das verschwindet sie beim Tippen.
+    set tv .pw.right.nb.form.tv
+    set sel [$tv selection]
+    if {$sel ne ""} {
+        set box [$tv set $sel box]
+        if {[llength $box] == 4} { markiere_box $box feldmark "#008000" }
+    }
 }
 
 # Das Feld umranden, in dem die Marke sitzt.
@@ -960,10 +1355,51 @@ proc canvasKlick {wx wy} {
     $tv selection set {}
 }
 
+# Wo die Felder liegen -- immer, nicht erst nach Auswahl in der Liste.
+# Liegt das Rechteck ganz in der offenen Aufklappliste?
+proc inOffenerListe {box} {
+    global state
+    if {![llength $state(offeneliste)] || [llength $box] != 4} { return 0 }
+    lassign $state(offeneliste) ol ou orr oo
+    lassign $box bl bu br bo
+    return [expr {$bl >= $ol - 1 && $br <= $orr + 1
+               && $bu >= $ou - 1 && $bo <= $oo + 1}]
+}
+
+proc felderRahmen {} {
+    global state
+    .pw.left.c delete feldrahmen
+    if {$state(doc) eq ""} return
+    if {![info exists state(page)]} return
+    foreach e [pdfium::formfields $state(doc) $state(page)] {
+        set box [lindex $e 4]
+        if {[llength $box] == 4} {
+            # KEIN RAHMEN UEBER EINER OFFENEN LISTE.
+            #
+            # Die Rahmen liegen auf dem Canvas UEBER dem gerenderten
+            # Bild -- also auch ueber der Aufklappliste, die PDFium in
+            # das Bild zeichnet. Gemeldet 08.09.2026 mit einem
+            # Bildschirmfoto: ein blauer Kasten mitten in der offenen
+            # Liste.
+            #
+            # Es war der Rahmen von "f_menge": das Feld liegt bei
+            # y 631..647, die Liste oeffnet sich von 673 bis 606
+            # darueber. Der Rahmen war richtig, nur an einer Stelle
+            # sichtbar, an der er nichts zu suchen hat.
+            #
+            # PDFium nennt die Flaeche selbst: FFI_Invalidate meldet
+            # nach dem Klick {159 606 361 673} -- Feld PLUS Liste.
+            if {[inOffenerListe $box]} { continue }
+            markiere_box $box feldrahmen "#4a90d9"
+        }
+    }
+    .pw.left.c raise feldmark
+}
+
 proc markiere_box {box tag farbe {fuellung ""}} {
     global state
     lassign $box links unten rechts oben
-    lassign [pdfium::pagesize $state(doc) $state(page)] wmm hmm
+    lassign [seitenmass] wmm hmm
     set wpt [expr {$wmm * 72.0 / 25.4}]
     set hpt [expr {$hmm * 72.0 / 25.4}]
     if {$wpt <= 0 || $hpt <= 0} return
@@ -975,6 +1411,7 @@ proc markiere_box {box tag farbe {fuellung ""}} {
         [expr {$links  * $sx}] [expr {($hpt - $oben)  * $sy}] \
         [expr {$rechts * $sx}] [expr {($hpt - $unten) * $sy}] \
         {*}$args
+    if {$tag eq "feldmark"} { .pw.left.c raise feldmark }
 }
 
 # Den Aufbau der aktuellen Seite auflisten.
@@ -1155,6 +1592,15 @@ proc show_page {} {
     .pw.left.c configure -scrollregion [list 0 0 $iw $ih]
     .pw.left.c yview moveto 0
     .pw.left.c xview moveto 0
+
+    # ALLE Felder umranden, nicht nur das angeklickte.
+    #
+    # Die Fixtures tragen fuer leere Widgets einen leeren Appearance-
+    # Strom (/Length 0, kein Rechteck). PDFium zeichnet dann nichts:
+    # gemessen an tests/fixtures/form-drei.pdf -- die Liste nannte
+    # eins/zwei/drei, auf der Seite standen nur die Beschriftungen.
+    # Ohne Rahmen sieht das Blatt leer aus und laesst sich nicht treffen.
+    felderRahmen
 
     # Die Markierung gehoert zum Bild, nicht zur Suche: nach Zoom oder
     # Seitenwechsel muss sie neu gerechnet werden, sonst steht sie am
@@ -1486,7 +1932,7 @@ proc cmd_print_ql {} {
     wm transient $w .
 
     # Seitengröße der aktuellen PDF-Seite
-    set sz  [pdfium::pagesize $state(doc) $state(page)]
+    set sz  [seitenmass]
     set pdf_wmm [format "%.1f" [lindex $sz 0]]
     set pdf_hmm [format "%.1f" [lindex $sz 1]]
 
@@ -1610,7 +2056,7 @@ proc cmd_print_ql {} {
     # Ausgabegröße berechnen
     proc update_ql_info {} {
         global state
-        set sz   [pdfium::pagesize $state(doc) $state(page)]
+        set sz   [seitenmass]
         set wmm  [lindex $sz 0]
         set hmm  [lindex $sz 1]
         set band $::_ql_band
@@ -1857,6 +2303,16 @@ ${band}mm Band, ${dpi} DPI,\
 # ------------------------------------------------------------------ #
 # Start: Datei aus Kommandozeile?                                     #
 # ------------------------------------------------------------------ #
+# Mitschnitt, falls die Umgebung ihn verlangt. VOR dem Oeffnen, damit
+# auch das erste Laden darin steht.
+if {[info exists ::env(VIEWER4_SPUR)] && $::env(VIEWER4_SPUR) ne ""} {
+    if {[catch {spurAn $::env(VIEWER4_SPUR)} sperr]} {
+        puts stderr $sperr
+    } else {
+        puts stderr "Mitschnitt: $::env(VIEWER4_SPUR)"
+    }
+}
+
 if {[llength $argv] >= 1} {
     after 100 [list open_pdf [lindex $argv 0]]
 }

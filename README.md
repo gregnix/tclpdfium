@@ -7,7 +7,7 @@ metadata, search, bookmarks, form fields and annotations directly from
 Tcl/Tk — and, since 0.4, creating and editing PDFs (import/merge/split,
 delete/rotate pages, crop, embed images, save).
 
-**Version:** 0.6.3  
+**Version:** 0.6.4  
 **License:** BSD  
 **Platform:** Linux x86_64, Windows x64 (MinGW, cross-built or native)  
 **Tcl/Tk:** 8.5, 8.6, 9.0  
@@ -326,8 +326,13 @@ tclpdfium/
 make test
 ```
 
-102 tests, 0 failures with a display. **Without one, six are skipped
-rather than failing**: `render` needs a Tk photo and Tk needs a display.
+The suite should finish with **0 failures**. The count is deliberately
+not written down here: it was `102` while the suite had long passed 139,
+and a number in prose is wrong the moment someone adds a test. Whether
+it is right is what `make test` says.
+
+**Without a display, tests are skipped rather than failed**: `render`
+needs a Tk photo and Tk needs a display.
 Until 0.6.3 three of them failed there, because they check an *option
 message* and carried no constraint -- it only came out the first time
 the suite ran without Xvfb.
@@ -351,309 +356,80 @@ throughout.
 
 ## Changes
 
-### 0.6.3
+### 0.6.4
 
-- **Typing into a page** through a session -- see below.
-- **`::pdfium::images`** reports image resolution -- see below.
-- **`::pdfium::formfill`** fills fields; **`::pdfium::formfields`** reads
-  through the form interface, with changed type names -- see below.
-- **The viewer fills forms.** `app/viewer4.tcl`: click a field **on the
-  page** to select it, double click to fill it -- a text field asks for a
-  value, a check box toggles. The same works from the field list. The tab
-  carries the field count, and a document with fields but no bookmarks
-  opens on it -- otherwise the fields sat in a tab nobody looked at.
+Forms, mostly. The detail behind each line sits in the code comment and
+in the test named after it -- this list says *what*, not *why with
+numbers*.
 
-- **`::pdfium::addannot` / `::pdfium::delannot`** create and remove
-  annotations: `highlight`, `underline`, `strikeout`, `squiggly`,
-  `square`, `text`. The third way to mark a word, next to stamping and
-  flattening -- and the only one that stays removable and
-  machine-readable. No appearance stream is written; viewers draw text
-  markup from `/QuadPoints` and `/C`, and a test measures that PDFium
-  does.
+**Form environment**
 
-- **`::pdfium::formfill`** fills text, combo-box, check-box and
-  radio-button fields through
-  PDFium's form-fill environment, so the appearance is rebuilt by the
-  engine -- not by writing `/V` and hoping. A field with several widgets
-  is filled by one call.
+- One `FPDFDOC_InitFormFillEnvironment` in the whole module, owned by
+  the document (`_DocFormGet`), released by `close` (2.87, 2.80). The
+  current page is set *before* the environment is built, or the first
+  `editrender` crashes.
+- A transient page load no longer steals the typing session's page
+  (`sessionPage`, `_DocFormSeiteAb`, `viewer-forms-6.5`).
+- The session implements PDFium's eight required `FPDF_FORMFILLINFO`
+  callbacks; `pdfium::editstate` hands back what they report (2.81,
+  2.82). Timers only hand out an id -- the caret does not blink.
+- `editbegin` refuses a second session on the same document (2.84).
+- `formfill` works during a session (2.79).
 
-- **Field type names changed** with it: `button` became `pushbutton`,
-  `checkbox` or `radiobutton`; `choice` became `combobox` or `listbox`.
-  Code testing for the old names will no longer match, and the entry
-  grew from three elements to five.
+**New commands**
 
-- **`formfields` reports the field's `/TU`**, the text a viewer shows as
-  a tooltip -- "Empfänger, Name und Anschrift" instead of `f_kunde_2`.
-  `app/viewer4.tcl` shows it in the list and keeps the technical name in
-  a column beside it, because that is the one you fill by.
+- `pdfium::formcheck` -- what is *suspicious*, next to `formfields`
+  which says what is *there*. Three codes: `EMPTY_AP`, `VALUE_NO_AP`,
+  `CHOICE_VALUE_INVALID` (2.94, 2.95).
+- `pdfium::edittext` -- `{name text}` of the focused field before the
+  value is committed (2.89 to 2.91).
+- `pdfium::editstate` -- dirty rectangle, cursor shape, changed flag.
+- `formfields` gained `apLength` as its eighth element (2.85).
 
-- **Choice fields report their permitted values.** `formfields` used to
-  say `combobox` and keep quiet about which values were allowed; and
-  `formfill` reported a success while the value stayed empty, because a
-  combo box without the edit flag cannot be written to. It now reads the
-  value back, navigates with the arrow keys to the option whose label
-  matches, and names the permitted values when there is no match. List
-  boxes too.
+**Filling and drawing**
 
-- **`::pdfium::formfields` reads through the form interface.** `/T`, `/V`
-  and `/FT` may be inherited from the parent field; reading them off the
-  widget returned empty type, name and value for a field with several
-  widgets, and a nested name without its parent. Each entry now also
-  carries the flags and the rectangle.
+- A radio group is named by its option, not just switched on.
+- A field on several pages gets the appearance copied to widgets of the
+  same size (2.74).
+- `editclick` answers `0` nothing, `1` a field, `2` PDFium reacted
+  without a field there -- that third case is an entry in an open
+  dropdown (2.88).
+- `editrender` no longer crashes when it is the very first call
+  (`EnsureTk`, 2.86).
+- `pdfview` draws form fields unless `-forms 0` (pdfview-9.1).
 
-- **`::pdfium::signatures`** reports the parts of each signature.
-  **Not a verification** -- see below.
+**Viewer**
 
-- **Embedded files:** `::pdfium::attachments`, `::pdfium::attachment`,
-  `::pdfium::addattachment`, `::pdfium::delattachment`. Reading and
-  **writing**, natively -- `tclpdfreader` goes through qpdf for this.
-  Addressed by index, since names need not be unique; contents are byte
-  arrays, since an attachment is arbitrary binary material. Note that
-  `delattachment` removes the entry, not the data.
+- Outlines every field on the page, and leaves them out over an open
+  dropdown (4.1, 4.2, 6.7).
+- Shows `AP` in the field list, fills radio groups and choice fields
+  properly, arrow keys work on the page, a value shows up as soon as it
+  is chosen (5.1 to 5.4, 6.3, 6.4, 6.6).
+- `VIEWER4_SPUR=/tmp/spur.txt` records every call to the binding with
+  its answer and every click in both coordinate systems (6.1).
+- Page size is fetched once per page, not once per field (6.2).
 
-- **`::pdfium::catalog`** reports `tagged` and `language` for the whole
-  document. Asked indirectly via an empty structure tree, "not tagged"
-  cannot be told apart from "this page has nothing in it"; and without
-  `/Lang` a screen reader pronounces German text in English.
+**Diagnosis**
 
-- **`::pdfium::pageobjects -marks 1`** reports the **names** of the
-  marked-content marks an object sits in -- `Artifact`, `OC`, `P` and so
-  on. Without them an artifact (a running header, a page number) cannot
-  be told apart from untagged content: both carry no MCID, and PDFium
-  reports the same `-1` for either.
+- `tools/katalog.tcl` measures what PDFium draws per field and from
+  what. **No appearance stream is better than an empty one**: with an
+  empty one PDFium draws nothing, with none at all it builds one (2.92).
+  `/NeedAppearances` makes it discard a good stream (2.93, 2.96).
+  Firefox is no reference -- pdf.js never looks at the stream; Chrome's
+  pale boxes are its own interface layer over it.
+- `tools/pruefe-baum.sh` says what this directory would actually load,
+  and names a stale library or a Windows index as such.
+- The Windows package indexes return early on other platforms.
 
-  Only the names. The parameters of an `OC` mark come back as type 0, so
-  PDFium says *that* an object is in a layer but not which one.
+**Housekeeping**
 
-  Without `-marks` the entry stays a triple, as before.
+- Every `Tcl_DecrRefCount` has its `Tcl_IncrRefCount`; `localtime_r`
+  gets its POSIX feature macro; the page-restore rule sits in one
+  function instead of five; every fixture shows something when opened.
 
-### 0.6.2
+### Older versions
 
-- **`::pdfium::search -rects 1`** returns the rectangles of each hit, not
-  only the character position. A hit becomes `{startpos count {rect ...}}`,
-  each rect `{left bottom right top}` in points, page coordinates, origin
-  bottom left -- the numbers a strike-through line or a highlight is drawn
-  with. Until now the position said *that* something is there, not *where*;
-  crossing a word out in a foreign PDF was not possible.
-
-  Several rectangles per hit are normal: a match can run across a line
-  break or sit in more than one text run, and PDFium returns one rectangle
-  per contiguous piece. Returning only the first would draw the line-break
-  case silently wrong.
-
-- **`::pdfium::render -clip {left bottom right top}`** renders only that
-  part of the page. Every zoom used to build the whole page; on an A0
-  drawing that is the difference between usable and not.
-
-- **`::pdfium::render -printing 1`** renders the way a printer would
-  (`FPDF_PRINTING`). This makes `/Usage /Print /PrintState /OFF`
-  measurable instead of believed. Measured on pdf4tcl's demo-layers.pdf:
-  58656 dark pixels on screen, 52782 when printing, and the difference is
-  exactly the layer marked `-print 0`.
-
-- **`::pdfium::pageobjects`** reports what a page is made of: one entry
-  `{index type {left bottom right top}}` per object, with type `text`,
-  `path`, `image`, `shading`, `form` or `unknown`. `gettext` says what is
-  on the page, `structure` how it is tagged; what it is drawn from was
-  not available.
-
-- **Typing into a page:** `::pdfium::editbegin`, `editclick`, `editchar`,
-  `editkey`, `editrender`, `editend`. A session, because focus and caret are state that
-  every other command throws away per call. `tab` moves to the next
-  field. Typing inserts at the caret; `formfill` replaces. In
-  `app/viewer4.tcl` it just works: click into a field on the page and
-  type, tab moves on -- no mode to switch on first.
-
-- **`::pdfium::pageobjects -fonts 1`** reports face, size, flags and
-  whether the font is embedded. The last one is the portability
-  question: a face that is not embedded looks different on another
-  machine, and that only shows up there.
-
-- **`::pdfium::images`** reports pixel size and the resolution each image
-  actually lands on the paper with. A scan can look fine on screen and
-  come out flat in print; this says so beforehand. The figure comes from
-  PDFium, which accounts for the transformation matrix -- "width divided
-  by points" would be wrong for a rotated image, and wrong without
-  looking wrong.
-
-- **Embedded files:** `::pdfium::attachments`, `::pdfium::attachment`,
-  `::pdfium::addattachment`, `::pdfium::delattachment`. Reading and
-  **writing**, natively -- `tclpdfreader` goes through qpdf for this.
-  Addressed by index, since names need not be unique; contents are byte
-  arrays, since an attachment is arbitrary binary material. Note that
-  `delattachment` removes the entry, not the data.
-
-- **`::pdfium::catalog`** reports `tagged` and `language` for the whole
-  document. Asked indirectly via an empty structure tree, "not tagged"
-  cannot be told apart from "this page has nothing in it"; and without
-  `/Lang` a screen reader pronounces German text in English.
-
-- **`::pdfium::pageobjects -marks 1`** reports the names of the
-  marked-content marks an object sits in. Without them an artifact (a
-  running header, a page number) cannot be told apart from untagged
-  content: both carry no MCID.
-
-- **`::pdfium::charboxes`** gives one rectangle per character, optionally
-  for a `-range {start count}` -- exactly the two numbers `search` returns
-  without `-rects`. Where a single character sits was not available.
-
-- **`::pdfium::mctext -boxes 1`** adds the rectangle of each text object.
-  It returns a different shape (triples) on purpose: appending a third
-  element to the flat alternating list would silently break `dict get`
-  at the caller.
-
-- **`::pdfium::render -forms 1`** draws form fields as well, and the
-  viewer uses it. Without it a filled field is listed by `formfields` but
-  missing from the picture: PDFium draws widget annotations through the
-  form layer, not with the page contents.
-
-- **`::pdfium::flatten`** burns annotations and form fields into the page
-  contents. Afterwards they are drawing -- not clickable, not removable,
-  but not dependent on the viewer either. The opposite of overlaying:
-  there the original stays untouched, here it is changed. Returns
-  `nothing` when there is nothing to burn in, which is not an error.
-
-- **The viewer searches and highlights.** `app/viewer4.tcl` has a search
-  box; hits are marked on the page. Possible only since `search -rects 1`
-  -- before, a hit said the word is on the page, not where.
-
-- **`search` reads its options in pairs.** Only one pair at a fixed
-  position was read before, so `search $doc 0 word -case 1 -rects 1` would
-  have dropped the rectangles without a word. An option without a value is
-  now reported.
-
-### 0.6.1
-
-- **`::pdfium::mctext`** returns the text of a page grouped by
-  marked-content ID, in the order the objects sit in the content stream.
-  Together with `structure`, which gives the order of the structure tree,
-  this makes the READING ORDER measurable: does a document read the way it
-  is tagged, or the way it happens to be drawn? A screen reader follows the
-  tree, and no validator checks this -- a conformant file can be tagged in
-  one order and drawn in another. Text objects without a marked-content ID
-  land under the key `-1`; in a tagged document that key should not appear,
-  since it is content a screen reader cannot reach.
-
-- **Unknown options are refused rather than ignored.** `render` knows
-  `-dpi`, `-width` and `-imagename` and used to drop anything else without
-  a word: `render -scale 2.0` -- an option only `print` has -- produced the
-  same image for every factor, with no way of telling why. `render` and
-  `search` now name the offending option and the ones they accept, and an
-  odd number of trailing words is refused instead of silently dropping the
-  last one. `search -case` also checks its value, which it did not.
-
-- **`::pdfium::structure`** returns the tagged-PDF structure tree of a page
-  as nested Tcl dicts: role, `/Alt`, `/ActualText`, `/Lang`, `/ID`,
-  attributes such as `/Scope` and `/ListNumbering`, and the marked-content
-  ids. `mcids` is a **list** — an element spanning a page break has more
-  than one, and PDFium's single-value getter drops the rest silently. Pages
-  without a structure tree return an empty list rather than an error, since
-  most PDFs have none. See `examples/structure-dump.tcl`.
-
-  The point of the command is a second opinion: PDFium is the engine in
-  Chrome and Edge, so it reads a tagged document the way a large share of
-  readers do. In its first use it showed that structure elements living in
-  a form XObject do not appear at all — in a file that veraPDF accepts as
-  PDF/UA.
-
-### 0.6.0
-
-- **Windows printing (GDI/DEVMODE).** PDFium renders into a Windows device
-  context, so printing works without any external program. New commands, all
-  Windows-only: `::pdfium::canprint`, `::pdfium::printers`,
-  `::pdfium::defaultprinter`, `::pdfium::papers`, `::pdfium::print`, and
-  `::pdfium::printercaps`. On other platforms `canprint` returns 0 and the
-  rest are not created, so callers branch on it instead of catching errors.
-  Built and verified with both MSVC/nmake and MSYS2; Brother QL label
-  printing works. Full option reference in `doc/api-reference.md`.
-- **`::pdfium::print` covers the label and booklet cases.** Per-cell N-up with
-  a gutter, margins measured from the paper edge, exact 1:1 (`-fit 0`), and
-  scaling computed here rather than handed to the driver — `dmScale`/`dmNup`
-  are reported by many drivers and then silently ignored.
-- **`::pdfium::printercaps` answers the borderless question** by measuring the
-  printable area of each form instead of trusting a flag.
-- **Build wiring for the print path.** `configure.ac` adds
-  `-lgdi32 -lwinspool` on Windows; `win/makefile.vc` takes `PDFIUMDIR`, links
-  the pdfium import library and the Tk stubs (`PROJECT_REQUIRES_TK`), and
-  stops with a clear error if pdfium is not found rather than failing at the
-  final link.
-
-### 0.5.3
-
-- **TEA build.** `configure && make && make test && make install`, like any other
-  Tcl extension. `--with-pdfium` points at the SDK; without it,
-  `vendor/pdfium-<platform>/` is found automatically. `configure` probes for the
-  link library name rather than guessing it, sets the `$ORIGIN` runpath, and
-  `make install` copies the PDFium runtime next to the extension. The
-  hand-written Makefile is gone.
-- **One directory serves both Tcl generations.** TEA names the libraries
-  `libpdfiumtcl<ver>.so` and `libtcl9pdfiumtcl<ver>.so`; `pkgIndex.tcl` picks at
-  load time.
-- **`configure` aborts on a Tcl/Tk version mismatch.** Without `--with-tcl` and
-  `--with-tk` the search heuristic guesses, and with several installations it may
-  guess inconsistently — unversioned symlinks such as `/usr/lib/tclConfig.sh` are
-  a common cause. Compiling `tk.h` from one generation against `tcl.h` from
-  another used to succeed and fail later, somewhere unrelated.
-- **`Tcl_Size` shim fixed.** It tested only `TCL_SIZE_MAX`. TEA passes
-  `-DTcl_Size=int` on the command line for a Tcl 8 build, so the typedef expanded
-  to `typedef int int;` and the compiler stopped.
-- **Windows cross-build in one command** — `tools/build-windows.sh`. It compiles
-  the Tcl/Tk stub libraries for MinGW from source, writes a `tclConfig.sh` for the
-  target, builds in its own directory, and inspects the DLL before shipping it.
-- **`tools/find-tclconfig.tcl`** lists every `tclConfig.sh`/`tkConfig.sh` on the
-  machine with its version, pairs them, and prints the matching `configure` line.
-  Runs anywhere a `tclsh` does, Windows included.
-
-### 0.5.2
-
-- **Crash fixed in `addimagebitmap`** — the command read a Tk photo without ever
-  calling `Tk_InitStubs`. `tkStubsPtr` was NULL, and calling it before any
-  `pdfium::render` killed the process with no message. It now initializes Tk
-  lazily, exactly like `render` does, and reports a normal Tcl error when Tk is
-  unavailable.
-- **Commands registered with fully qualified names** (`::pdfium::open` instead of
-  `pdfium::open`). The unqualified form is resolved against the *current*
-  namespace; loading the package from inside a proc silently put all 26 commands
-  into `::pdfium::pdfium::`. This never surfaced while `package ifneeded` loaded
-  at global level — the new VFS-aware loader does not.
-- **`pkgIndex.tcl` works inside a starpack.** Tcl copies only the directly loaded
-  library out of a VFS, leaving `libpdfium` behind; on Linux the `$ORIGIN`
-  runpath then points at the temp directory. The loader now unpacks *both*
-  libraries into one directory and loads from there, so a starpack stays a single
-  file. `TCLPDFIUM_TMPDIR` redirects the unpack directory when `/tmp` is `noexec`.
-- **Windows / Tcl 9 cross-build works.** `make dist-windows90` no longer bails
-  out: `tools/make-win-stubs.sh` compiles the Tcl and Tk stub libraries from
-  source (two C files) for the MinGW toolchain. No MSYS2 `tcl9` package and no
-  Windows machine required.
-- **`scripts/get-pdfium.cmd`** — PDFium download for cmd.exe, using the `curl.exe`
-  and `tar.exe` that ship with Windows. `setup.sh` needs a shell; this does not.
-- **PDFium now lands in `vendor/pdfium-<platform>/`** so the Linux and Windows
-  SDKs can coexist in one tree, which the cross-build requires.
-
-### 0.5.1
-
-- **Tk loaded lazily** — only `pdfium::render` initializes Tk now. Loading the
-  package no longer opens the `.` window or traps a headless `tclsh` script in
-  the event loop.
-- **Text correct under Tcl 9** — `gettext`, `meta`, `search`, link URLs and form
-  field text now convert UTF-16 ↔ UTF-8 portably (via `utf-16le` encoding)
-  instead of relying on `Tcl_UniChar`, which changed width in Tcl 9. Fixes
-  garbled output and broken search under Tcl 9.
-
----
-
-## See Also
-
-- [bblanchon/pdfium-binaries](https://github.com/bblanchon/pdfium-binaries) — prebuilt PDFium
-- [pdf4tcl](https://sourceforge.net/projects/pdf4tcl/) — create PDFs
-- [tkmcairo](https://github.com/gregnix/tkmcairo) — Cairo 2D graphics for Tcl
-- [doc/api-reference.md](doc/api-reference.md) — full API documentation
-- [INSTALL.md](INSTALL.md) — building, installing, troubleshooting
-
----
-
-## License
-
-tclpdfium: BSD  
-PDFium: BSD (Apache CLA)  
-Third-party licenses: see `vendor/pdfium-<platform>/licenses/`
+The history of 0.6.3 and earlier lives in
+[doc/changes-history.md](doc/changes-history.md). It is kept because a
+line of it explains why something is the way it is today -- but not in
+the file that is supposed to show how the package is used.

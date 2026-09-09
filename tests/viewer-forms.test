@@ -202,4 +202,536 @@ test viewer-forms-2.2 {die Vorlage wird nicht ueberschrieben} \
 } -result {1 1}
 
 
+test viewer-forms-3.1 {der Doppelklick fuellt trotz laufender Sitzung} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # DIE REIHENFOLGE, die seit der selbststartenden Sitzung kaputt war.
+    #
+    # PDFium vertraegt nur eine Formularumgebung je Dokument; solange
+    # die Sitzung laeuft, findet formfill die Felder nicht. Die Sitzung
+    # wird darum fuer die Dauer des Aufrufs ausgesetzt und danach
+    # wieder aufgesetzt.
+    #
+    # Gemeldet 07.09.2026. Kein Test hatte das gefangen: basic.test
+    # prueft formfill OHNE Sitzung, viewer-forms prueft das Tippen OHNE
+    # formfill. Jedes Stueck fuer sich war gruen.
+    set tv .pw.right.nb.form.tv
+    proc ::demo_fragText {t v} { return "Spedition Muster" }
+    tippenAn 1
+    update
+    $tv selection set [lindex [$tv children {}] 0]
+    ::demo_formFill
+    update
+    set wert [$tv set [lindex [$tv children {}] 0] value]
+    set nachher [expr {$::state(edit) ne ""}]
+    tippenAus 1
+    list $wert $nachher
+} -result {{Spedition Muster} 1}
+
+test viewer-forms-4.1 {jedes Feld der Seite bekommt einen Rahmen} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # EIN LEERES WIDGET TRAEGT EINEN LEEREN ERSCHEINUNGSSTROM, und
+    # PDFium zeichnet genau den -- also ist der Kasten nicht da. Auf dem
+    # Bildschirm sah eine Vorlage wie ein leeres Blatt mit Beschriftung
+    # aus, obwohl der Reiter "Formular" die Felder auflistete.
+    #
+    # Bis dahin umrandete der Viewer nur das AUSGEWAEHLTE Feld gruen.
+    # Wer nicht in den Reiter klickte, sah keine Felder.
+    #
+    # Der Viewer malt die Rechtecke jetzt selbst, aus "formfields". An
+    # den Dateien ist nichts geaendert -- die leeren Stroeme bleiben.
+    #
+    # Dass manche Dateien trotzdem richtig aussahen, ist ein Zufall: ein
+    # Dokument mit Rechenfeld bekommt /NeedAppearances, und dann baut
+    # der Betrachter die Erscheinungen selbst, Kreise und Kaesten
+    # eingeschlossen. Gemessen an demo-forms.pdf: 6951 dunkle Punkte
+    # ohne Formularschicht, 8858 mit -- bei den anderen Vorlagen
+    # aenderte sie nichts.
+    expr {[llength [.pw.left.c find withtag feldrahmen]] > 0}
+} -result 1
+
+test viewer-forms-4.2 {die Rahmen ueberleben Klick, Tippen und Fuellen} \
+        -constraints {haveFormPdf haveViewer} -body {
+    # show_page raeumt mit "delete all" auf, und tippenZeichnen ebenso.
+    # Ohne Nachziehen waeren die Rahmen nach dem ersten Tastendruck weg
+    # -- und das faellt erst auf, wenn man tippt.
+    proc ::demo_fragText {t v} { return "Muster" }
+    tippenAn 1
+    update
+    set nach1 [llength [.pw.left.c find withtag feldrahmen]]
+    lassign [feldMitteCanvas 0] cx cy
+    tippenKlick $cx $cy
+    update
+    set nach2 [llength [.pw.left.c find withtag feldrahmen]]
+    tippenTaste M M
+    update
+    set nach3 [llength [.pw.left.c find withtag feldrahmen]]
+    tippenAus 1
+    update
+    set nach4 [llength [.pw.left.c find withtag feldrahmen]]
+    expr {$nach1 > 0 && $nach2 == $nach1 && $nach3 == $nach1
+          && $nach4 == $nach1}
+} -result 1
+
+set ::gruppePdfV [file join [file dirname [file normalize [info script]]] \
+        fixtures form-gruppe.pdf]
+testConstraint haveGruppeV [file readable $::gruppePdfV]
+set ::dreiPdfV [file join [file dirname [file normalize [info script]]] \
+        fixtures form-drei.pdf]
+testConstraint haveDreiV [file readable $::dreiPdfV]
+
+test viewer-forms-5.1 {die ZWEITE Optionszeile waehlt Express} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # DIE API KONNTE ES LAENGST -- basic.test 2.60 waehlt "express" ueber
+    # den Exportwert. Die BEDIENUNG konnte es nicht: der Viewer schickte
+    # einen Wahrheitswert an den GRUPPENNAMEN, und der trifft immer das
+    # erste Widget. Express und Overnight waren nicht waehlbar, und nach
+    # Normal hiess es "schon gewaehlt".
+    #
+    # Gruene API-Tests sagen nichts ueber die Bedienung. Das ist die
+    # Luecke, die diese Datei schliessen soll -- und sie war bis
+    # 08.09.2026 ungetestet.
+    #
+    # Die Feldliste fuehrt je Zeile ihr eigenes Rechteck; ein Klick
+    # dorthin trifft genau dieses Widget.
+    open_pdf $::gruppePdfV
+    update
+    set tv .pw.right.nb.form.tv
+    set n 0
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] ne "prio"} continue
+        incr n
+        if {$n == 2} { $tv selection set $id ; break }
+    }
+    ::demo_formFill
+    update
+    set wert ""
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "prio"} { set wert [$tv set $id value] ; break }
+    }
+    set wert
+} -result express
+
+test viewer-forms-5.2 {eine Combobox wird GEWAEHLT, nicht getippt} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # Ein Kombinationsfeld ohne Bearbeitungsflagge nimmt keinen Freitext
+    # -- der Viewer fragte trotzdem danach. Die erlaubten Werte stehen
+    # seit 0.6.3 in "formfields"; die Feldliste fuehrte sie nur nicht
+    # mit.
+    #
+    # demo_fragText darf hier NICHT aufgehen: waere es ein Textdialog,
+    # bekaeme der Benutzer eine Frage nach etwas, das das Feld nicht
+    # annimmt.
+    set ::textDialogKam 0
+    rename ::demo_fragText ::demo_fragTextEcht
+    proc ::demo_fragText {t v} { set ::textDialogKam 1 ; return "" }
+    rename ::demo_fragWahl ::demo_fragWahlEcht
+    proc ::demo_fragWahl {t werte jetzt} { return [lindex $werte 1] }
+
+    set tv .pw.right.nb.form.tv
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} { $tv selection set $id ; break }
+    }
+    ::demo_formFill
+    update
+    set wert ""
+    set opts {}
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} {
+            set wert [$tv set $id value]
+            set opts [$tv set $id options]
+            break
+        }
+    }
+    rename ::demo_fragText {} ; rename ::demo_fragTextEcht ::demo_fragText
+    rename ::demo_fragWahl {} ; rename ::demo_fragWahlEcht ::demo_fragWahl
+    list $wert $::textDialogKam [llength $opts]
+} -result {{Artikel B} 0 4}
+
+test viewer-forms-5.3 {die Pfeiltasten waehlen in einer Combobox auf der Seite} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # DIE TASTATURZUORDNUNG HINKTE DER API HINTERHER.
+    #
+    # "editkey" hat "up" und "down" bekommen, als formfill Auswahlfelder
+    # lernte. "tippenTaste" kannte sie nie -- sie fielen in den
+    # default-Zweig, wo ein leeres %A stillschweigend verworfen wird.
+    #
+    # Auf der API-Ebene ging es die ganze Zeit: editclick, dann "down",
+    # ergibt "Artikel A". Im Viewer kam nichts an, und niemand sah
+    # warum: kein Fehler, keine Meldung, nur nichts.
+    #
+    # Gemeldet 08.09.2026 als "combobox funktioniert noch nicht".
+    open_pdf $::gruppePdfV
+    update
+    set tv .pw.right.nb.form.tv
+    set box {}
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} { set box [$tv set $id box] ; break }
+    }
+    if {[llength $box] != 4} { return "kein Rechteck" }
+    lassign $box l u r o
+    lassign [pdfium::pagesize $::state(doc) 0] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    tippenAn 1
+    tippenKlick [expr {int((($l + $r) / 2) * $sx)}] \
+                [expr {int(($hpt - ($u + $o) / 2) * $sy)}]
+    tippenTaste Down {}
+    tippenAus 1
+    update
+    set wert ""
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} { set wert [$tv set $id value] }
+    }
+    set wert
+} -result {Artikel A}
+
+test viewer-forms-5.4 {nach der Wahl steht der Wert SOFORT in der Feldliste} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # DER UNTERSCHIED ZWISCHEN "gespeichert" UND "sichtbar".
+    #
+    # Gemeldet 08.09.2026 mit drei Bildschirmfotos: Liste aufgeklappt,
+    # "Sonderbestellung" gewaehlt und im Feld zu sehen, danach wieder
+    # leer. In der gespeicherten Datei stand der Wert -- es war ein
+    # ANZEIGEFEHLER, kein Speicherfehler.
+    #
+    # PDFium schreibt beim Fokusverlust fest. Nach einer Wahl aus der
+    # Liste ist die Eingabe fertig, also gibt der Viewer den Fokus ab
+    # und nimmt die Sitzung neu auf.
+    open_pdf $::gruppePdfV
+    update
+    set tv .pw.right.nb.form.tv
+    set box {}
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} { set box [$tv set $id box] ; break }
+    }
+    if {[llength $box] != 4} { return "kein Rechteck" }
+    lassign $box l u r o
+    lassign [pdfium::pagesize $::state(doc) 0] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    tippenAn 1
+    tippenKlick [expr {int(($r - 6) * $sx)}] \
+                [expr {int(($hpt - ($u + $o) / 2) * $sy)}]
+    update
+    tippenKlick [expr {int(($l + 40) * $sx)}] \
+                [expr {int(($hpt - ($u - 44)) * $sy)}]
+    update
+    set wert ""
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} { set wert [$tv set $id value] }
+    }
+    tippenAus 1
+    expr {$wert ne ""}
+} -result 1
+
+test viewer-forms-6.1 {der Mitschnitt haelt Klick und Antwort fest} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # WOZU.
+    #
+    # Am 08.09.2026 hat dieselbe Meldung -- "combobox funktioniert
+    # nicht" -- dreimal etwas anderes bedeutet: die Feldliste, der Klick
+    # auf der Seite, der Eintrag in der offenen Liste. Jedes Mal habe
+    # ich das Gemessene repariert und das Gemeinte verfehlt.
+    #
+    # Ein Satz laesst drei Deutungen zu. Ein Mitschnitt laesst keine:
+    # er nennt die Reihenfolge, die Koordinaten in BEIDEN Systemen und
+    # die Antwort der Bindung.
+    #
+    #     Klick Fenster 416/445 -> Seite 199.1/628.9
+    #     pdfium::editclick ... -> 2
+    set datei [file join [temporaryDirectory] spur-[pid].txt]
+    open_pdf $::gruppePdfV
+    update
+    spurAn $datei
+    set tv .pw.right.nb.form.tv
+    set box {}
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} { set box [$tv set $id box] ; break }
+    }
+    lassign $box l u r o
+    lassign [pdfium::pagesize $::state(doc) 0] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    tippenAn 1
+    tippenKlick [expr {int(($r - 6) * $sx)}] \
+                [expr {int(($hpt - ($u + $o) / 2) * $sy)}]
+    update
+    tippenAus 1
+    spurAus
+    set ch [open $datei r]
+    set inhalt [read $ch]
+    close $ch
+    file delete $datei
+    list [string match "*Klick Fenster*Seite*" $inhalt] \
+         [string match "*pdfium::editclick*" $inhalt]
+} -result {1 1}
+
+test viewer-forms-6.2 {das Seitenmass wird beim Dateiwechsel vergessen} \
+        -constraints {haveGruppeV haveViewer haveDreiV} -body {
+    # AUS EINEM MITSCHNITT, 08.09.2026: bei jedem Neuzeichnen stand
+    # "pdfium::pagesize" sechzehnmal hintereinander -- einmal je Feld,
+    # weil markiere_box es selbst holt und felderRahmen ueber alle
+    # Felder laeuft. Insgesamt 101 Aufrufe in einer kurzen Sitzung,
+    # jetzt 2.
+    #
+    # Aufgefallen war es niemandem: es war nicht falsch, nur
+    # verschwendet. Im Betrieb sieht man das nicht, im Mitschnitt
+    # sofort.
+    #
+    # Ein Zwischenspeicher ist nur so gut wie sein Vergessen: ein Mass,
+    # das nach dem Dateiwechsel stehenbleibt, setzt jeden Rahmen an die
+    # falsche Stelle.
+    #
+    # ACHTUNG BEIM LESEN DIESES TESTS: er war schon GRUEN, bevor das
+    # Vergessen ueberhaupt eingebaut war -- der Schluessel enthaelt das
+    # Dokument-Handle, und das war zufaellig verschieden. Darauf darf
+    # man sich nicht verlassen: PDFium vergibt fuer ein neues Dokument
+    # gern DIESELBE Adresse. Genau daran ist am selben Tag die
+    # Formularumgebung haengengeblieben.
+    #
+    # Der Test prueft darum zusaetzlich, dass der Speicher nach dem
+    # Wechsel WIRKLICH leer ist, und nicht bloss einen anderen
+    # Schluessel hat.
+    open_pdf $::gruppePdfV
+    update
+    set a [seitenmass]
+    open_pdf $::dreiPdfV
+    update
+    set b [seitenmass]
+    set echt [pdfium::pagesize $::state(doc) 0]
+    # Nach dem Wechsel darf HOECHSTENS der Eintrag der neuen Datei da
+    # sein -- der alte muss weg.
+    set eintraege [llength [array names ::state mass,*]]
+    list [expr {$a ne $b}] [expr {$b eq $echt}] $eintraege
+} -result {1 1 1}
+
+test viewer-forms-6.3 {beim Tippen steht der Text SOFORT in der Feldliste} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # "per tastatur bleibt leer" -- gemeldet 08.09.2026 zusammen mit
+    # einem Mitschnitt, der es genau zeigte: editchar -> 1, und danach
+    # meldete formfields wieder "f_name {}".
+    #
+    # Die Bindung war in Ordnung. Was fehlte, war der Weg an den
+    # laufenden Text: PDFium schreibt erst beim Fokusverlust fest, und
+    # den Fokus abzugeben haette das Weitertippen verhindert.
+    open_pdf $::gruppePdfV
+    update
+    set tv .pw.right.nb.form.tv
+    set ziel ""
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_name"} { set ziel $id ; break }
+    }
+    if {$ziel eq ""} { return "kein f_name" }
+    $tv selection set $ziel
+    lassign [$tv set $ziel box] l u r o
+    lassign [seitenmass] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    tippenAn 1
+    tippenKlick [expr {int((($l + $r) / 2) * $sx)}] \
+                [expr {int(($hpt - ($u + $o) / 2) * $sy)}]
+    update
+    foreach z {f g} { tippenTaste $z $z ; update }
+    set inListe [$tv set $ziel value]
+    tippenAus 1
+    set inListe
+} -result fg
+
+test viewer-forms-6.4 {ein Tab traegt nichts in fremde Zeilen ein} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # "combobox benutzt, ploetzlich sind auch die anderen Felder mit
+    # Daten" -- gemeldet 08.09.2026 mit einem Mitschnitt.
+    #
+    # Der Eintrag des laufenden Textes ging in die AUSGEWAEHLTE Zeile.
+    # Nach einem Tab wandert der Fokus aber, und die Auswahl bleibt
+    # stehen: der Inhalt von f_menge landete bei dem Feld, das der
+    # Benutzer zuletzt angeklickt hatte.
+    #
+    # Zweitens teilt sich eine Optionsgruppe einen Namen -- drei Zeilen
+    # heissen "prio". Der erste Treffer bekam den Eintrag, und ein
+    # leerer Text loeschte das "Off": aus drei Zeilen wurden zwei.
+    #
+    # Geprueft wird darum die GANZE Liste, vorher und nachher.
+    open_pdf $::gruppePdfV
+    update
+    set tv .pw.right.nb.form.tv
+    proc _zeig {tv} {
+        set aus {}
+        foreach id [$tv children {}] {
+            lappend aus "[$tv set $id id]=[$tv set $id value]"
+        }
+        return $aus
+    }
+    set ziel ""
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_firma"} { set ziel $id ; break }
+    }
+    $tv selection set $ziel
+    lassign [$tv set $ziel box] l u r o
+    lassign [seitenmass] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    tippenAn 1
+    tippenKlick [expr {int((($l + $r) / 2) * $sx)}] \
+                [expr {int(($hpt - ($u + $o) / 2) * $sy)}]
+    update
+    foreach z {g m b h} { tippenTaste $z $z ; update }
+    set vorher [_zeig $tv]
+    foreach n {1 2 3 4} { tippenTaste Tab "\t" ; update }
+    set nachher [_zeig $tv]
+    tippenAus 1
+    rename _zeig {}
+    # Der getippte Wert muss da sein, und sonst darf sich NICHTS
+    # geaendert haben.
+    list [expr {[lsearch -exact $vorher "f_firma=gmbh"] >= 0}] \
+         [expr {$vorher eq $nachher}]
+} -result {1 1}
+
+test viewer-forms-6.5 {nach dem Festschreiben bleibt der Text auf der Seite} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # DER STILLE C-FEHLER, den eine Durchsicht am 08.09.2026 benannt
+    # hat: jeder Form-Befehl laedt sich eine EIGENE Seite -- ein zweites
+    # Objekt derselben Seite -- trug sie in curPage ein und setzte
+    # curPage danach auf NULL. Waehrend einer Sitzung gab FFI_GetPage
+    # dann NULL zurueck.
+    #
+    # Sichtbar wird es NACH dem Festschreiben: waehrend des Tippens
+    # zeichnet PDFium den Text aus dem Widget, nach dem Tab aus der
+    # Seite -- und die fand es nicht mehr.
+    #
+    #     alt:  getippt 11567 -> nach Tab 11396   (Text weg)
+    #     neu:  getippt 11567 -> nach Tab 11567   (Text bleibt)
+    #
+    # Gemeldet mit sieben Bildschirmfotos: die Feldliste zeigte "muster"
+    # und "company", auf dem Blatt blieben Name und Firma leer -- bis
+    # die Combobox benutzt wurde, denn die beendet die Sitzung und setzt
+    # sie neu auf.
+    #
+    # DIESER TEST GEHOERT HIERHER, nicht in basic.test. Drei Anlaeufe
+    # dort haben nichts gemessen: der Unterschied entsteht erst, wenn
+    # der Viewer nach jedem Zeichen formfields ruft und die Seite neu
+    # zeichnet. Ein Test auf der falschen Ebene ist gruen, egal was der
+    # Code tut.
+    proc _v65dunkel {} {
+        set n 0
+        for {set y 0} {$y < [image height pdfpage]} {incr y 3} {
+            foreach z [pdfpage data -from 0 $y [image width pdfpage] \
+                    [expr {$y + 1}]] {
+                foreach px $z { if {$px ne "#ffffff"} { incr n } }
+            }
+        }
+        return $n
+    }
+    open_pdf $::gruppePdfV
+    update
+    set tv .pw.right.nb.form.tv
+    set ziel ""
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_name"} { set ziel $id ; break }
+    }
+    $tv selection set $ziel
+    lassign [$tv set $ziel box] l u r o
+    lassign [seitenmass] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    tippenAn 1
+    tippenKlick [expr {int((($l + $r) / 2) * $sx)}] \
+                [expr {int(($hpt - ($u + $o) / 2) * $sy)}]
+    update
+    foreach z {m u s t e r} { tippenTaste $z $z ; update }
+    set getippt [_v65dunkel]
+    tippenTaste Tab "\t"
+    update
+    set nachTab [_v65dunkel]
+    tippenAus 1
+    rename _v65dunkel {}
+    # Die Schreibmarke faellt weg, ein paar Punkte weniger sind normal.
+    # Ein ganzes Wort nicht -- gemessen 171.
+    expr {$getippt - $nachTab < 60}
+} -result 1
+
+test viewer-forms-6.6 {die Feldliste zeigt die Laenge des Erscheinungsstroms} \
+        -constraints {haveViewer} -body {
+    # 0 heisst: die Datei sagt nicht, wie das Feld aussieht -- PDFium
+    # zeichnet dann nichts, und man sucht den Fehler in der Bindung.
+    # Genau das hat am 07./08.09.2026 einen halben Tag gekostet.
+    #
+    # Die Zahl gab es seit 0.6.4 in "formfields", nur sehen konnte man
+    # sie nicht. Eine Diagnose, die man erst holen muss, holt niemand.
+    set katB [file join [file dirname [file normalize [info script]]] \
+            fixtures katalog fall-b-leer.pdf]
+    if {![file readable $katB]} { return "keine Vorlage" }
+    open_pdf $katB
+    update
+    set tv .pw.right.nb.form.tv
+    set leer 0
+    set voll 0
+    foreach id [$tv children {}] {
+        if {[$tv set $id ap] == 0} { incr leer } else { incr voll }
+    }
+    # In dieser Vorlage sind Text, Kaestchen und Optionsfelder leer,
+    # Kombination und Liste nicht -- derselbe Erzeuger, dieselbe Datei.
+    list [expr {"ap" in [$tv cget -displaycolumns]}] \
+         [expr {$leer > 0}] [expr {$voll > 0}]
+} -result {1 1 1}
+
+test viewer-forms-6.7 {kein Feldrahmen ueber einer offenen Aufklappliste} \
+        -constraints {haveGruppeV haveViewer} -body {
+    # Gemeldet 08.09.2026 mit einem Bildschirmfoto: ein blauer Kasten
+    # mitten in der offenen Liste.
+    #
+    # Es war der Rahmen von "f_menge" -- das Feld liegt bei y 631..647,
+    # die Liste oeffnet sich von 673 bis 606 darueber. Der Rahmen war
+    # RICHTIG, nur an einer Stelle sichtbar, an der er nichts zu suchen
+    # hat: die Rahmen liegen auf dem Canvas ueber dem Bild, und die
+    # Liste zeichnet PDFium ins Bild.
+    #
+    # PDFium nennt die Flaeche selbst -- FFI_Invalidate meldet nach dem
+    # Klick {159 606 361 673}. Zum zweiten Mal zahlen sich die
+    # Pflichtrueckrufe aus.
+    #
+    # Erkannt wird das Aufklappen an der HOEHE der gemeldeten Flaeche:
+    # nach jedem Tastendruck meldet PDFium ebenfalls einen Bereich, und
+    # der ist das Feld. "Irgendetwas hat sich geaendert" waere kein
+    # Merkmal.
+    open_pdf $::gruppePdfV
+    update
+    set tv .pw.right.nb.form.tv
+    set ziel ""
+    foreach id [$tv children {}] {
+        if {[$tv set $id id] eq "f_artikel"} { set ziel $id ; break }
+    }
+    # OHNE AUSWAHL IN DER LISTE -- so, wie ein Klick auf die Seite es
+    # hinterlaesst.
+    #
+    # Der erste Anlauf hier waehlte die Zeile vorher aus, und die
+    # Erkennung las die Feldhoehe daraus. Beim Klick direkt auf die
+    # Seite ist nichts ausgewaehlt, die Hoehe blieb 0, und die Rahmen
+    # standen weiter ueber der Liste. Gemeldet 08.09.2026 mit einem
+    # zweiten Bildschirmfoto -- der Test war gruen, der Fehler da.
+    lassign [$tv set $ziel box] l u r o
+    $tv selection remove [$tv children {}]
+    lassign [seitenmass] wmm hmm
+    set hpt [expr {$hmm * 72.0 / 25.4}]
+    set sx [expr {[image width pdfpage] / ($wmm * 72.0 / 25.4)}]
+    set sy [expr {[image height pdfpage] / $hpt}]
+    tippenAn 1
+    update
+    set vorher [llength [.pw.left.c find withtag feldrahmen]]
+    tippenKlick [expr {int(($r - 6) * $sx)}] \
+                [expr {int(($hpt - ($u + $o) / 2) * $sy)}]
+    update
+    set nachher [llength [.pw.left.c find withtag feldrahmen]]
+    set flaeche $::state(offeneliste)
+    tippenAus 1
+    # Die Flaeche muss erkannt sein, und es muessen WENIGER Rahmen sein.
+    list [expr {[llength $flaeche] == 4}] [expr {$nachher < $vorher}]
+} -result {1 1}
+
 ::tcltest::cleanupTests

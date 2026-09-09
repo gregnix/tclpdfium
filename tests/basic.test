@@ -829,14 +829,14 @@ test pdfiumtcl-2.44 {jedes Feld nennt Flaggen und Rechteck} \
     # Das Rechteck gehoert dazu: wer ein Feld anklicken oder hervorheben
     # will, braucht es -- und es zweimal zu holen waere ein zweiter Weg
     # zu denselben Zahlen. Wie ueberall {links unten rechts oben}.
-    # Sieben Elemente seit 0.6.3:
-    # {typ name wert flags rechteck optionen erklaerung}.
+    # Acht Elemente seit 0.6.4:
+    # {typ name wert flags rechteck optionen erklaerung aplaenge}.
     # Optionen und Erklaerung sind bei den meisten Feldern leer -- aber
     # DA: eine Rueckgabe, die je nach Feldart verschieden lang ist,
     # zwingt jeden Aufrufer zu einer Fallunterscheidung.
     set schlecht 0
     foreach e [pdfium::formfields $d 0] {
-        if {[llength $e] != 7} { incr schlecht }
+        if {[llength $e] != 8} { incr schlecht }
         lassign [lindex $e 4] l u r t
         if {[llength [lindex $e 4]] != 4} { incr schlecht ; continue }
         if {$l >= $r || $u >= $t} { incr schlecht }
@@ -1282,7 +1282,7 @@ test pdfiumtcl-2.63 {bei anderen Feldarten bleibt die Liste leer} \
     set laengen {}
     foreach e [pdfium::formfields $d 0] { lappend laengen [llength $e] }
     lsort -unique $laengen
-} -cleanup {pdfium::close $d} -result 7
+} -cleanup {pdfium::close $d} -result 8
 
 test pdfiumtcl-2.64 {ein Auswahlfeld wird ueber die Beschriftung gewaehlt} \
         -constraints haveGruppePdf -body {
@@ -1354,16 +1354,18 @@ test pdfiumtcl-2.66 {formfields nennt den Namen fuer Menschen} \
 } -cleanup {pdfium::close $d} \
   -result {{f_kunde_2 {Empfaenger, Name und Anschrift}} {f_ohne {}}}
 
-test pdfiumtcl-2.67 {der Eintrag hat jetzt sieben Elemente} \
+test pdfiumtcl-2.67 {der Eintrag hat jetzt acht Elemente} \
         -constraints haveTooltipPdf -setup {
     set d [pdfium::open $::tooltipPdf]
 } -body {
-    # {typ name wert flags rechteck optionen erklaerung}. Die Rueckgabe
-    # ist eine Zusage; sie waechst nur mit einem Test, der es meldet.
+    # {typ name wert flags rechteck optionen erklaerung aplaenge}. Die
+    # Rueckgabe ist eine Zusage; sie waechst nur mit einem Test, der es
+    # meldet -- und das haben 2.44, 2.63 und dieser bei jeder
+    # Erweiterung getan.
     set laengen {}
     foreach e [pdfium::formfields $d 0] { lappend laengen [llength $e] }
     lsort -unique $laengen
-} -cleanup {pdfium::close $d} -result 7
+} -cleanup {pdfium::close $d} -result 8
 
 
 test pdfiumtcl-2.68 {pageobjects -fonts nennt Schrift und Groesse} \
@@ -1480,6 +1482,720 @@ test pdfiumtcl-2.73 {Listenfeld und Kombinationsfeld zaehlen VERSCHIEDEN} \
     pdfium::close $d2
     list $a $b
 } -result {Bremen {Artikel A}}
+
+
+set ::zweiSeitenPdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-zweiseiten.pdf]
+testConstraint haveZweiSeiten [file readable $::zweiSeitenPdf]
+
+test pdfiumtcl-2.74 {ein Feld auf zwei Seiten kommt auf BEIDE Blaetter} \
+        -constraints haveZweiSeiten -body {
+    # DER DURCHSCHLAGSATZ.
+    #
+    # PDFium baut den Erscheinungsstrom nur fuer das Widget neu, an dem
+    # der Fokus war. Gemessen 07.09.2026: Vaterfeld mit /V(Muster),
+    # Widget 1 mit frischem Strom, Widget 2 mit dem alten leeren -- und
+    # /NeedAppearances steht nicht da, also DARF ein Betrachter den
+    # alten nehmen. Auf dem Papier blieb Seite 2 leer.
+    #
+    # Weder ein Aufruf je Seite noch "flatten -forms" half: der Wert
+    # steht ja schon, es gibt fuer PDFium nichts neu zu bauen. Der
+    # frische Strom wird darum KOPIERT.
+    #
+    # Geprueft wird auf dem PAPIER, nicht an /V: dass der Wert gesetzt
+    # ist, war nie das Problem.
+    set voll [file join [temporaryDirectory] zs-[pid].pdf]
+    set fest [file join [temporaryDirectory] zsf-[pid].pdf]
+    set d [pdfium::open $::zweiSeitenPdf]
+    pdfium::formfill $d 0 {empf Muster}
+    pdfium::save $d $voll
+    pdfium::close $d
+    set e [pdfium::open $voll]
+    pdfium::flatten $e 0
+    pdfium::flatten $e 1
+    pdfium::save $e $fest
+    pdfium::close $e
+    set f [pdfium::open $fest]
+    set t1 [pdfium::gettext $f 0]
+    set t2 [pdfium::gettext $f 1]
+    pdfium::close $f
+    file delete $voll $fest
+    list [string match "*Muster*" $t1] [string match "*Muster*" $t2]
+} -result {1 1}
+
+
+set ::radioWertePdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-radiowerte.pdf]
+testConstraint haveRadioWerte [file readable $::radioWertePdf]
+
+test pdfiumtcl-2.75 {ein Optionsfeld wird beim NAMEN gewaehlt} \
+        -constraints haveRadioWerte -body {
+    # Eine Gruppe teilt sich einen Namen; welche Option gemeint ist,
+    # sagt der EXPORTWERT des einzelnen Widgets. Bis hierher nahm
+    # formfill nur einen Wahrheitswert -- und der waehlte immer das
+    # erste Widget. "express" war nicht ansprechbar, und die Meldung
+    #
+    #     "prio" is a radio button and takes a boolean
+    #
+    # schickte den Aufrufer in die falsche Richtung: nicht der Wert war
+    # falsch, sondern der Weg fehlte.
+    set treffer {}
+    foreach wunsch {normal express overnight} {
+        set d [pdfium::open $::radioWertePdf]
+        pdfium::formfill $d 0 [list prio $wunsch]
+        foreach x [pdfium::formfields $d 0] {
+            if {[lindex $x 0] eq "radiobutton"} {
+                lappend treffer [lindex $x 2]
+                break
+            }
+        }
+        pdfium::close $d
+    }
+    set treffer
+} -result {normal express overnight}
+
+test pdfiumtcl-2.76 {ein Wahrheitswert geht weiter} \
+        -constraints haveRadioWerte -setup {
+    set d [pdfium::open $::radioWertePdf]
+} -body {
+    # Erst wird nach dem Exportwert gesucht, und nur wenn keiner passt
+    # UND der Wert ein Wahrheitswert ist, bleibt es beim alten
+    # Verhalten. Sonst braeche eine bestehende Verwendung mit "1".
+    pdfium::formfill $d 0 {prio 1}
+    set w ""
+    foreach x [pdfium::formfields $d 0] {
+        if {[lindex $x 0] eq "radiobutton"} { set w [lindex $x 2] ; break }
+    }
+    set w
+} -cleanup {pdfium::close $d} -result normal
+
+test pdfiumtcl-2.77 {eine unbekannte Option wird mit den erlaubten gemeldet} \
+        -constraints haveRadioWerte -setup {
+    set d [pdfium::open $::radioWertePdf]
+} -body {
+    catch {pdfium::formfill $d 0 {prio eilig}} e
+    list [string match "*no such option*" $e] \
+         [string match "*express*" $e]
+} -cleanup {pdfium::close $d} -result {1 1}
+
+
+set ::taggedFormPdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-tagged.pdf]
+testConstraint haveTaggedForm [file readable $::taggedFormPdf]
+
+test pdfiumtcl-2.78 {Fuellen und Speichern erhaelt die Auszeichnung} \
+        -constraints haveTaggedForm -body {
+    # EINE ENTWARNUNG, gemessen statt gehofft.
+    #
+    # PDFium schreibt die Datei beim Speichern NEU. Ginge dabei der
+    # Strukturbaum verloren, braeche Barrierefreiheit lautlos weg: die
+    # Datei sieht gleich aus, ein Vorleseprogramm findet aber nichts
+    # mehr. Ein Frachtbrief nach PDF/UA waere danach keiner.
+    #
+    # Gemessen: Auszeichnung, Sprache und Baum bleiben.
+    proc _typen {baum} {
+        set aus {}
+        foreach k $baum {
+            if {[dict exists $k type]} { lappend aus [dict get $k type] }
+            if {[dict exists $k children]} {
+                lappend aus {*}[_typen [dict get $k children]]
+            }
+        }
+        return $aus
+    }
+    set voll [file join [temporaryDirectory] tg-[pid].pdf]
+    set d [pdfium::open $::taggedFormPdf]
+    set vorher [list [pdfium::catalog $d] [_typen [pdfium::structure $d 0]]]
+    pdfium::formfill $d 0 {kunde "Muster GmbH"}
+    pdfium::save $d $voll
+    pdfium::close $d
+    set e [pdfium::open $voll]
+    set nachher [list [pdfium::catalog $e] [_typen [pdfium::structure $e 0]]]
+    set wert [lindex [lindex [pdfium::formfields $e 0] 0] 2]
+    pdfium::close $e
+    file delete $voll
+    rename _typen {}
+    list [expr {$vorher eq $nachher}] $wert
+} -result {1 {Muster GmbH}}
+
+
+test pdfiumtcl-2.79 {formfill geht WAEHREND einer Tippsitzung} \
+        -constraints haveFormPdf -body {
+    # EINE UMGEBUNG JE DOKUMENT.
+    #
+    # Bis 0.6.4 baute jeder Aufruf -- render, formfields, formfill,
+    # flatten, editbegin -- seine eigene Formularumgebung auf und wieder
+    # ab. PDFium vertraegt aber nur EINE je Dokument: die zweite sah die
+    # Felder nicht, und formfill meldete "could not fill", obwohl der
+    # Name stimmte. Der Viewer musste die Sitzung dafuer aussetzen.
+    #
+    # Jetzt gehoert sie dem Dokument. Beides geht nebeneinander.
+    #
+    # Der erste Anlauf stellte die AUSKUNFTSBEFEHLE zuerst um und liess
+    # die Sitzung ihre eigene bauen -- damit gab es wieder zwei, und die
+    # Suite endete im Segmentierungsfehler. Die Sitzung musste zuerst
+    # umziehen.
+    set d [pdfium::open [formularPdf]]
+    set s [pdfium::editbegin $d 0]
+    set rc [catch {pdfium::formfill $d 0 {name "Muster"}} e]
+    pdfium::editend $s
+    pdfium::close $d
+    list $rc $e
+} -result {0 1}
+
+test pdfiumtcl-2.80 {close beendet eine offene Tippsitzung} \
+        -constraints haveFormPdf -body {
+    # AUS EINER DURCHSICHT, 08.09.2026: "pdfium::close beendet eine
+    # offene Tippsitzung nicht. FormHandle, Seite und ffi bleiben.
+    # Absturzrisiko."
+    #
+    # Nachgemessen war es SCHLIMMER als ein Absturz: "editchar" nach
+    # dem Schliessen lief DURCH -- kein Fehler, kein Absturz, Zugriff
+    # auf freigegebenen Speicher. Ein Fehler, der nicht auffaellt und
+    # irgendwann woanders zuschlaegt.
+    #
+    # close baut die Sitzung jetzt ab, statt sie abzulehnen: wer ein
+    # Dokument schliesst, will es los sein. Die Sitzung merkt sich, dass
+    # sie tot ist.
+    set d [pdfium::open [formularPdf]]
+    set s [pdfium::editbegin $d 0]
+    pdfium::close $d
+    set a [catch {pdfium::editchar $s "X"} e1]
+    set b [catch {pdfium::editend $s} e2]
+    list $a [string match "*session is over*" $e1] \
+         $b [string match "*session is over*" $e2]
+} -result {1 1 1 1}
+
+
+test pdfiumtcl-2.81 {PDFium meldet, was neu zu zeichnen ist} \
+        -constraints haveFormPdf -body {
+    # DIE ACHT PFLICHTRUECKRUFE.
+    #
+    # Die Kopfdatei sagt bei acht Eintraegen der FPDF_FORMFILLINFO
+    # "Implementation Required: yes" -- FFI_Invalidate, SetCursor,
+    # SetTimer, KillTimer, GetLocalTime, GetPage, GetRotation,
+    # ExecuteNamedAction. Bis 0.6.4 standen sie alle auf NULL.
+    #
+    # Fuer ein statisches FPDF_FFLDraw geht das erstaunlich oft gut. Fuer
+    # einen Viewer mit Fokus und Schreibmarke nicht: der Aufrufer wusste
+    # nach jedem Tastendruck nicht, WAS sich geaendert hat, und zeichnete
+    # die ganze Seite neu.
+    #
+    # Gemessen: nach dem Klick meldet PDFium das Feldrechteck und die
+    # Zeigerform 3 (Textmarke).
+    set d [pdfium::open [formularPdf]]
+    set s [pdfium::editbegin $d 0]
+    set vor [dict get [pdfium::editstate $s] dirty]
+    lassign [textfeldMitte $d] mx my
+    pdfium::editclick $s $mx $my
+    set st [pdfium::editstate $s]
+    # Das Lesen setzt zurueck -- sonst zeichnete ein Aufrufer, der es
+    # vergisst, fuer immer neu.
+    set danach [dict get [pdfium::editstate $s] dirty]
+    pdfium::editend $s
+    pdfium::close $d
+    list $vor [dict get $st dirty] [llength [dict get $st rect]] \
+         [expr {[dict get $st cursor] != 0}] $danach
+} -result {0 1 4 1 0}
+
+test pdfiumtcl-2.82 {das gemeldete Rechteck ist das Feld} \
+        -constraints haveFormPdf -body {
+    # Nicht irgendein Rechteck: es muss das Feld enthalten, sonst
+    # zeichnete ein Aufrufer die falsche Stelle neu -- und das faellt
+    # erst auf, wenn dort etwas stehen bleibt.
+    set d [pdfium::open [formularPdf]]
+    set feld [lindex [lindex [pdfium::formfields $d 0] 0] 4]
+    lassign $feld fl fu fr fo
+    set s [pdfium::editbegin $d 0]
+    pdfium::editclick $s [expr {($fl + $fr) / 2.0}] [expr {($fu + $fo) / 2.0}]
+    lassign [dict get [pdfium::editstate $s] rect] rl rt rr rb
+    pdfium::editend $s
+    pdfium::close $d
+    # PDFium meldet {links oben rechts unten} mit oben < unten in
+    # Bildschirmzaehlung -- geprueft wird die waagerechte Lage und dass
+    # das Rechteck nicht leer ist.
+    expr {$rl <= $fl + 1 && $rr >= $fr - 1 && $rr > $rl}
+} -result 1
+
+test pdfiumtcl-2.83 {die Rueckrufe zeichnen KEINEN leeren /AP herbei} \
+        -constraints haveCheckboxPdf -body {
+    # EINE ENTWARNUNG MIT UMGEKEHRTEM VORZEICHEN.
+    #
+    # Die Hoffnung war, eine vollstaendige Formularumgebung koenne
+    # Felder mit leerem Erscheinungsstrom doch noch darstellen. Gemessen
+    # 08.09.2026: sie kann es nicht -- dieselbe Zahl dunkler Punkte mit
+    # und ohne Rueckrufe.
+    #
+    # Ein leerer /AP bleibt leer. Wer solche Felder sichtbar machen will,
+    # muss die Rechtecke selbst malen; app/viewer4.tcl tut das.
+    if {[catch {package require Tk}]} { return 1 }
+    proc _dunkel {img} {
+        set n 0
+        for {set y 0} {$y < [image height $img]} {incr y 2} {
+            foreach z [$img data -from 0 $y [image width $img] \
+                    [expr {$y+1}]] {
+                foreach px $z { if {$px ne "#ffffff"} { incr n } }
+            }
+        }
+        return $n
+    }
+    set d [pdfium::open $::checkboxPdf]
+    pdfium::render $d 0 -dpi 100 -forms 1 -imagename ::t83a
+    set ohne [_dunkel ::t83a]
+    set s [pdfium::editbegin $d 0]
+    pdfium::editrender $s -dpi 100 -imagename ::t83b
+    set mit [_dunkel ::t83b]
+    pdfium::editend $s
+    pdfium::close $d
+    image delete ::t83a ::t83b
+    rename _dunkel {}
+    expr {$ohne == $mit}
+} -result 1
+
+
+test pdfiumtcl-2.84 {keine zweite Sitzung auf demselben Dokument} \
+        -constraints haveFormPdf -body {
+    # Die Umgebung gehoert dem Dokument, also teilten sich zwei
+    # Sitzungen dieselbe -- und mit ihr Fokus und Schreibmarke. Wer in
+    # der einen tippt, aendert die andere mit, und "editend" der ersten
+    # meldet die Seite ab, waehrend die zweite sie noch braucht.
+    #
+    # formfill prueft das seit der gemeinsamen Umgebung NICHT mehr, weil
+    # es dort nebeneinander geht. Hier ist es weiterhin falsch -- ein
+    # Punkt, den eine Durchsicht gefunden hat und kein Test.
+    set d [pdfium::open [formularPdf]]
+    set s1 [pdfium::editbegin $d 0]
+    set rc [catch {pdfium::editbegin $d 0} e]
+    pdfium::editend $s1
+    # Danach muss es wieder gehen, sonst waere die Wache selbst der
+    # Fehler.
+    set rc2 [catch {set s2 [pdfium::editbegin $d 0]}]
+    if {!$rc2} { pdfium::editend $s2 }
+    pdfium::close $d
+    list $rc [string match "*already open*" $e] $rc2
+} -result {1 1 0}
+
+
+test pdfiumtcl-2.85 {formfields nennt die Laenge des Erscheinungsstroms} \
+        -constraints {haveFormPdf haveDreiPdf} -body {
+    # DER HAEUFIGSTE GRUND FUER "das Feld ist da und man sieht nichts":
+    # /V steht, /AP ist LEER. Beides sind in PDF getrennte Dinge
+    # (ISO 32000-1 12.5.5) -- formfields nennt den Wert, PDFium zeichnet
+    # den Strom.
+    #
+    # Ohne diese Zahl sucht man den Fehler in der Bindung, im Renderweg
+    # oder in den Rueckrufen. Das hat am 07./08.09.2026 einen halben Tag
+    # gekostet. Mit ihr sieht man sofort: die Datei sagt nicht, wie das
+    # Feld aussieht.
+    #
+    # Eine eigene Diagnosefunktion waere ein zweiter Weg zu derselben
+    # Auskunft -- die Zahl gehoert dorthin, wo man ohnehin nachsieht.
+    set d [pdfium::open [formularPdf]]
+    set gefuellt [lindex [lindex [pdfium::formfields $d 0] 0] 7]
+    pdfium::close $d
+    set e [pdfium::open $::dreiPdf]
+    set leer [lindex [lindex [pdfium::formfields $e 0] 0] 7]
+    pdfium::close $e
+    # form.pdf traegt einen Strom, form-drei.pdf nicht.
+    list [expr {$gefuellt > 0}] $leer
+} -result {1 0}
+
+
+test pdfiumtcl-2.86 {editrender als ALLERERSTER Aufruf} \
+        -constraints {haveFormPdf haveTk} -body {
+    # EIN ABSTURZ, DEN NIEMAND SAH.
+    #
+    # Die Tk-Stubs werden verzoegert geholt (EnsureTk) -- nur wer ein
+    # Tk-Bild anfasst, braucht sie. "render" tut das seit jeher;
+    # "editrender" war ein zweiter Weg zu Tk_FindPhoto und hat es
+    # vergessen. Die Folge war kein Fehler, sondern ein
+    # SEGMENTIERUNGSFEHLER.
+    #
+    # Aufgefallen ist es nie, weil in der Suite und im Viewer IMMER
+    # erst gezeichnet wird. Gemessen 08.09.2026: ein "render -dpi 100"
+    # davor, und editrender laeuft; ohne, stirbt der Prozess.
+    #
+    # Darum prueft dieser Test ohne jedes vorherige Rendern -- ein
+    # eigener Prozess, denn ein Absturz nimmt die Suite mit.
+    set skript [file join [temporaryDirectory] er-[pid].tcl]
+    set ch [open $skript w]
+    puts $ch [list package require Tk]
+    puts $ch [list package require pdfiumtcl]
+    puts $ch [list set ::f [formularPdf]]
+    puts $ch {
+        set d [pdfium::open $::f]
+        set s [pdfium::editbegin $d 0]
+        pdfium::editrender $s -dpi 60 -imagename ::probe
+        pdfium::editend $s
+        pdfium::close $d
+        puts OK
+        exit 0
+    }
+    close $ch
+    set rc [catch {exec [info nameofexecutable] $skript} aus]
+    file delete $skript
+    list $rc [string match "*OK*" $aus]
+} -result {0 1}
+
+
+test pdfiumtcl-2.87 {alle Form-Befehle teilen die Umgebung des Dokuments} \
+        -constraints {haveFormPdf haveTk} -body {
+    # PRIORITAET 1 EINER DURCHSICHT VOM 08.09.2026: die Sitzung war
+    # umgezogen, render, formfill, flatten und formfields bauten
+    # weiterhin je eine EIGENE Umgebung. Damit kamen das gewoehnliche
+    # Bild und das Tippbild aus verschiedenen Handles.
+    #
+    # Jetzt gibt es im ganzen Modul genau EINEN Aufruf von
+    # FPDFDOC_InitFormFillEnvironment, und der steht in _DocFormGet.
+    #
+    # WAS DAS NICHT HEISST: render und editrender zeigen weiterhin
+    # Verschiedenes, und das ist richtig so. PDFium schreibt den Wert
+    # erst beim FOKUSVERLUST fest -- waehrend der Sitzung steht am Feld
+    # noch der alte, editrender zeichnet den laufenden Stand samt
+    # Schreibmarke. Gemessen: 'Muster GmbH' waehrend, 'Muster GmbHXYZ'
+    # danach.
+    set d [pdfium::open [formularPdf]]
+    set s [pdfium::editbegin $d 0]
+    lassign [textfeldMitte $d] mx my
+    pdfium::editclick $s $mx $my
+    pdfium::editchar $s "XYZ"
+    set waehrend [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+    # render waehrend einer offenen Sitzung darf nicht scheitern -- mit
+    # zwei Umgebungen war das der Fall.
+    set rcR [catch {pdfium::render $d 0 -dpi 60 -forms 1 -imagename ::t87}]
+    catch {image delete ::t87}
+    pdfium::editend $s
+    set danach [lindex [lindex [pdfium::formfields $d 0] 0] 2]
+    pdfium::close $d
+    list $rcR [expr {$waehrend ne $danach}] \
+         [string match "*XYZ" $danach]
+} -result {0 1 1}
+
+
+test pdfiumtcl-2.88 {ein Klick in die offene Aufklappliste waehlt} \
+        -constraints {haveGruppePdf haveTk} -body {
+    # PDFIUM ZEICHNET DIE LISTE SELBST, unterhalb des Feldes. Ein Klick
+    # auf "Artikel B" landet dort AUSSERHALB jedes Widget-Rechtecks --
+    # HasFormFieldAtPoint sagt nein, und editclick hat den Klick
+    # verschluckt. Auf dem Bildschirm blieb die Liste offen und
+    # reagierte auf nichts mehr.
+    #
+    # Gemeldet 08.09.2026 mit zwei Bildschirmfotos: Pfeil geklickt,
+    # Liste geht auf, danach tut die Maus nichts. Ich hatte bis dahin
+    # dreimal etwas anderes gemessen -- Feldliste, Seite, Aufklappen --
+    # und jedes Mal das Gemessene repariert statt des Gemeinten.
+    #
+    # Der Klick geht jetzt IMMER an PDFium; ob etwas geschah, sagt
+    # PDFium ueber FFI_Invalidate.
+    #
+    # DREI ANTWORTEN: 0 nichts, 1 dort lag ein Feld, 2 dort lag keines
+    # und PDFium hat trotzdem reagiert. Der Aufrufer braucht den
+    # Unterschied: nach einer Wahl aus der Liste ist die Eingabe FERTIG,
+    # und der Wert wird erst beim Fokusverlust festgeschrieben. Wer das
+    # nicht weiss, zeigt weiter das leere Feld -- und der Benutzer haelt
+    # es fuer nicht gespeichert.
+    set d [pdfium::open $::gruppePdf]
+    set s [pdfium::editbegin $d 0]
+    set box {}
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 1] eq "f_artikel"} { set box [lindex $e 4] ; break }
+    }
+    lassign $box l u r o
+    # Auf den Aufklappknopf rechts im Feld
+    set auf [pdfium::editclick $s [expr {$r - 6}] [expr {($u + $o) / 2.0}]]
+    # Und in die Liste, die UNTER dem Feld steht
+    set inListe [pdfium::editclick $s [expr {$l + 40}] [expr {$u - 28}]]
+    pdfium::editend $s
+    set wert ""
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 1] eq "f_artikel"} { set wert [lindex $e 2] }
+    }
+    pdfium::close $d
+    list $auf $inListe [expr {$wert ne ""}]
+} -result {1 2 1}
+
+
+test pdfiumtcl-2.89 {edittext nennt den Text VOR dem Festschreiben} \
+        -constraints haveGruppePdf -body {
+    # AUS EINEM MITSCHNITT, 08.09.2026: nach jedem "editchar" meldete
+    # formfields wieder "f_name {}" -- bis ein Tab kam, dann "f_name fg".
+    # Auf dem Bildschirm sieht das aus, als komme nichts an.
+    #
+    # PDFium schreibt einen Feldwert erst beim FOKUSVERLUST fest. Den
+    # Fokus dafuer abzugeben waere falsch: dann koennte man nicht
+    # weitertippen. FORM_GetFocusedText fragt PDFium direkt.
+    #
+    # Der Unterschied ist der Kern: formfields nennt das DOKUMENT,
+    # edittext die EINGABE.
+    set d [pdfium::open $::gruppePdf]
+    set s [pdfium::editbegin $d 0]
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 1] ne "f_name"} continue
+        lassign [lindex $e 4] l u r o
+        pdfium::editclick $s [expr {($l + $r) / 2.0}] \
+                             [expr {($u + $o) / 2.0}]
+        break
+    }
+    pdfium::editchar $s "f"
+    pdfium::editchar $s "g"
+    # {name text} -- der Name muss mit, sonst weiss ein Aufrufer nicht,
+    # WOHIN der Text gehoert. Nach einem Tab wandert der Fokus, waehrend
+    # eine Auswahl in einer Liste stehen bleibt.
+    set laufend [pdfium::edittext $s]
+    set imDokument ""
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 1] eq "f_name"} { set imDokument [lindex $e 2] }
+    }
+    pdfium::editend $s
+    set danach ""
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 1] eq "f_name"} { set danach [lindex $e 2] }
+    }
+    pdfium::close $d
+    list $laufend $imDokument $danach
+} -result {{f_name fg} {} fg}
+
+test pdfiumtcl-2.90 {ohne Fokus ist edittext leer} \
+        -constraints haveGruppePdf -body {
+    # Leer heisst: kein Feld hat den Fokus. Wer das nicht unterscheidet,
+    # traegt in der Feldliste eine leere Zeichenkette ueber einen guten
+    # Wert.
+    set d [pdfium::open $::gruppePdf]
+    set s [pdfium::editbegin $d 0]
+    set ohne [pdfium::edittext $s]
+    pdfium::editend $s
+    pdfium::close $d
+    set ohne
+} -result {{} {}}
+
+
+test pdfiumtcl-2.91 {edittext nennt das Feld, das den Fokus HAT} \
+        -constraints haveGruppePdf -body {
+    # NACH EINEM TAB WANDERT DER FOKUS.
+    #
+    # Gemessen 08.09.2026 an einem Mitschnitt: "edittext -> 1" nach
+    # mehreren Tabs -- der Inhalt von f_menge. Der Viewer trug ihn in
+    # die Zeile ein, die der Benutzer zuletzt angeklickt hatte, und auf
+    # dem Bildschirm hatten "ploetzlich auch die anderen Felder Daten".
+    #
+    # Der Text allein ist also nicht genug. Wer ihn anzeigt, muss
+    # wissen, WOHIN er gehoert.
+    set d [pdfium::open $::gruppePdf]
+    set s [pdfium::editbegin $d 0]
+    foreach e [pdfium::formfields $d 0] {
+        if {[lindex $e 1] ne "f_name"} continue
+        lassign [lindex $e 4] l u r o
+        pdfium::editclick $s [expr {($l + $r) / 2.0}] \
+                             [expr {($u + $o) / 2.0}]
+        break
+    }
+    pdfium::editchar $s "x"
+    set erst [lindex [pdfium::edittext $s] 0]
+    pdfium::editkey $s tab
+    set nachTab [lindex [pdfium::edittext $s] 0]
+    pdfium::editend $s
+    pdfium::close $d
+    list $erst [expr {$nachTab ne $erst}]
+} -result {f_name 1}
+
+
+set ::katB [file join [file dirname [file normalize [info script]]] \
+        fixtures katalog fall-b-leer.pdf]
+set ::katC [file join [file dirname [file normalize [info script]]] \
+        fixtures katalog fall-c-ohne-ap.pdf]
+testConstraint haveKatalog [expr {
+    [file readable $::katB] && [file readable $::katC]}]
+
+test pdfiumtcl-2.92 {kein Erscheinungsstrom ist besser als ein leerer} \
+        -constraints {haveKatalog haveTk} -body {
+    # DER ERSTE FUND DES ANZEIGEKATALOGS, 08.09.2026 -- und er dreht die
+    # Erwartung um.
+    #
+    #   /AP da, Laenge 0:   PDFium zeichnet NICHTS
+    #   /AP fehlt ganz:     PDFium BAUT sich einen und zeichnet
+    #
+    # Gemessen an derselben Feldart: ein Textfeld mit leerem Strom
+    # brachte 0 dunkle Punkte im Feld, dasselbe ohne jeden Strom 581 --
+    # und der Wert stand auf dem Blatt.
+    #
+    # Wer einen leeren Strom schreibt, sagt dem Betrachter "so sieht das
+    # Feld aus: naemlich gar nicht", und der glaubt es. Wer keinen
+    # schreibt, laesst ihn rechnen.
+    #
+    # Das erklaert die unsichtbaren Felder in leeren Formularen -- und
+    # sagt, wo die Behebung hingehoert: in den Erzeuger, nicht in den
+    # Betrachter.
+    proc _t92feld {img x1 y1 x2 y2} {
+        set n 0
+        for {set y $y1} {$y < $y2} {incr y} {
+            foreach z [$img data -from $x1 $y $x2 [expr {$y + 1}]] {
+                foreach px $z { if {$px ne "#ffffff"} { incr n } }
+            }
+        }
+        return $n
+    }
+    proc _t92mess {datei feldname} {
+        set d [pdfium::open $datei]
+        lassign [pdfium::pagesize $d 0] wmm hmm
+        set hpt [expr {$hmm * 72.0 / 25.4}]
+        set k [expr {100.0 / 72.0}]
+        set aus 0
+        pdfium::render $d 0 -dpi 100 -forms 1 -imagename ::t92img
+        foreach f [pdfium::formfields $d 0] {
+            if {[lindex $f 1] ne $feldname} continue
+            lassign [lindex $f 4] l u r o
+            set aus [_t92feld ::t92img [expr {int($l * $k) + 2}] \
+                    [expr {int(($hpt - $o) * $k) + 2}] \
+                    [expr {int($r * $k) - 2}] \
+                    [expr {int(($hpt - $u) * $k) - 2}]]
+            break
+        }
+        image delete ::t92img
+        pdfium::close $d
+        return $aus
+    }
+    set leererStrom [_t92mess $::katB t_text]
+    set garKeiner   [_t92mess $::katC c_text]
+    rename _t92feld {} ; rename _t92mess {}
+    # Der leere Strom zeichnet nichts, das Feld ohne Strom sehr wohl.
+    list [expr {$leererStrom == 0}] [expr {$garKeiner > 100}]
+} -result {1 1}
+
+
+set ::katD [file join [file dirname [file normalize [info script]]] \
+        fixtures katalog fall-d-needapp.pdf]
+testConstraint haveKatalogD [file readable $::katD]
+
+test pdfiumtcl-2.93 {NeedAppearances macht Optionsfelder sichtbar} \
+        -constraints {haveKatalog haveKatalogD haveTk} -body {
+    # ZWEITER FUND DES KATALOGS -- und die Aufloesung eines Raetsels vom
+    # Vormittag des 08.09.2026.
+    #
+    # Ein nicht gewaehltes Optionsfeld war in manchen Dateien zu sehen
+    # und in anderen nicht, bei derselben pdf4tcl-Fassung. Die Erklaerung
+    # steht in der Datei:
+    #
+    #   ohne NeedAppearances:  ap 0    -> 0 dunkle Punkte, kein Kreis
+    #   mit  NeedAppearances:  ap 178  -> 73 Punkte, Kreis da
+    #
+    # pdf4tcl setzt die Flagge, sobald ein Feld eine Rechenformel hat --
+    # und schreibt dann auch brauchbare Stroeme. demo-forms.pdf hat so
+    # ein Feld, meine Vorlagen hatten keines. Der sichtbare Unterschied
+    # hatte also mit den Optionsfeldern nichts zu tun.
+    proc _t93ap {datei name} {
+        set d [pdfium::open $datei]
+        set aus -1
+        foreach f [pdfium::formfields $d 0] {
+            if {[lindex $f 1] eq $name} { set aus [lindex $f 7] ; break }
+        }
+        pdfium::close $d
+        return $aus
+    }
+    set ohne [_t93ap $::katB t_radio]
+    set mit  [_t93ap $::katD t_radio]
+    rename _t93ap {}
+    list [expr {$ohne == 0}] [expr {$mit > 100}]
+} -result {1 1}
+
+
+set ::befundePdf [file join [file dirname [file normalize [info script]]] \
+        fixtures form-befunde.pdf]
+testConstraint haveBefunde [file readable $::befundePdf]
+
+test pdfiumtcl-2.94 {formcheck meldet leere Erscheinungsstroeme} \
+        -constraints haveKatalog -body {
+    # AUSLESEN UND PRUEFEN SIND ZWEI SACHEN. "formfields" ist auf acht
+    # Elemente gewachsen; jede weitere Auskunft macht es unleserlicher.
+    #
+    # LEER heisst: nichts aufgefallen -- und das soll man sehen koennen,
+    # statt es zu vermuten. fall-a hat brauchbare Stroeme, fall-c gar
+    # keine (PDFium baut sich dann selbst welche), fall-b leere.
+    set d [pdfium::open $::katB]
+    set b [pdfium::formcheck $d]
+    pdfium::close $d
+    set e [pdfium::open [file join [file dirname $::katB] fall-a-gefuellt.pdf]]
+    set a [pdfium::formcheck $e]
+    pdfium::close $e
+    set f [pdfium::open $::katC]
+    set c [pdfium::formcheck $f]
+    pdfium::close $f
+    list [expr {[llength $b] > 0}] [llength $a] [llength $c]
+} -result {1 0 0}
+
+test pdfiumtcl-2.95 {formcheck trennt Wert-ohne-Darstellung von leer} \
+        -constraints haveBefunde -body {
+    # VALUE_NO_AP ist der Fall, der am 07./08.09.2026 einen halben Tag
+    # gekostet hat: formfields nennt den Wert, im Betrachter sieht man
+    # nichts. Von EMPTY_AP getrennt, weil der eine ein verlorener Wert
+    # ist und der andere nur ein unsichtbares leeres Feld.
+    #
+    # CHOICE_VALUE_INVALID daneben: ein Auswahlfeld, dessen Wert unter
+    # seinen Optionen nicht vorkommt.
+    #
+    # DIE VORLAGE IST HANDGEBAUT. pdf4tcl erzeugt beides nicht -- es
+    # schreibt fuer ein Feld mit Wert einen richtigen Strom und prueft
+    # Auswahlwerte. Ein Befund, den man nicht herstellen kann, ist ein
+    # Befund, den man nicht pruefen kann.
+    set d [pdfium::open $::befundePdf]
+    set codes {}
+    foreach b [pdfium::formcheck $d] { lappend codes [lindex $b 0] }
+    pdfium::close $d
+    list [expr {"VALUE_NO_AP" in $codes}] \
+         [expr {"CHOICE_VALUE_INVALID" in $codes}] \
+         [expr {"EMPTY_AP" in $codes}]
+} -result {1 1 0}
+
+
+set ::katKaestchenA [file join [file dirname [file normalize [info script]]] \
+        fixtures katalog fall-a-kaestchen.pdf]
+set ::katKaestchenD [file join [file dirname [file normalize [info script]]] \
+        fixtures katalog fall-d-kaestchen.pdf]
+testConstraint haveKaestchen [expr {
+    [file readable $::katKaestchenA] && [file readable $::katKaestchenD]}]
+
+test pdfiumtcl-2.96 {NeedAppearances verwirft den Rahmen eines Kaestchens} \
+        -constraints haveKaestchen -body {
+    # EIN ERGEBNIS DES ANZEIGEKATALOGS, und eines, das ich zuerst dem
+    # falschen Paket angelastet habe.
+    #
+    # Zwei Dateien aus demselben Erzeuger, dasselbe Kaestchen mit
+    # Rahmen. Die eine enthaelt zusaetzlich ein Feld mit Rechenformel --
+    # und deshalb /NeedAppearances:
+    #
+    #   ohne die Flagge:  apLength 88, Rahmen da
+    #   mit  der Flagge:  apLength  4, Rahmen weg
+    #
+    # DER ERZEUGER IST NICHT SCHULD. In BEIDEN Rohdateien steht der
+    # Strichbefehl "re S"; PDFium baut die Off-Erscheinung unter der
+    # Flagge neu und liefert eine leere. Ein zweites, gewoehnliches Feld
+    # aendert nichts -- es ist die Flagge, nicht das Feld.
+    #
+    # Erst die ROHDATEI zu messen statt PDFium zu fragen hat das
+    # geklaert. Wer nur die Bindung fragt, sieht den Erzeuger schuldig.
+    proc _t96ap {datei} {
+        set d [pdfium::open $datei]
+        set aus -1
+        foreach f [pdfium::formfields $d 0] {
+            if {[lindex $f 0] eq "checkbox"} { set aus [lindex $f 7] ; break }
+        }
+        pdfium::close $d
+        return $aus
+    }
+    proc _t96roh {datei} {
+        set ch [open $datei rb]
+        set d [read $ch]
+        close $ch
+        return [expr {[string first "re S" $d] >= 0}]
+    }
+    set ohne [_t96ap $::katKaestchenA]
+    set mit  [_t96ap $::katKaestchenD]
+    set rohA [_t96roh $::katKaestchenA]
+    set rohD [_t96roh $::katKaestchenD]
+    rename _t96ap {} ; rename _t96roh {}
+    # Beide Dateien tragen den Strich; nur PDFium meldet einen
+    # unterschiedlichen Strom.
+    list $rohA $rohD [expr {$ohne > 50}] [expr {$mit < 10}]
+} -result {1 1 1 1}
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,48 @@
+%PDF-1.7
+%והצח
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [10 0 R 11 0 R]
+   /DR << /Font << /Helv 5 0 R >> >> >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842]
+   /Resources << /Font << /Helv 5 0 R >> >>
+   /Contents 4 0 R /Annots [10 0 R 11 0 R] >>
+endobj
+4 0 obj
+<< /Length 66 >>
+stream
+BT /Helv 12 Tf 40 760 Td (Fall C -- kein Erscheinungsstrom) Tj ET
+
+endstream
+endobj
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Name /Helv >>
+endobj
+10 0 obj
+<< /Type /Annot /Subtype /Widget /P 3 0 R /FT /Tx /T (c_text)
+   /V (Wert ohne AP) /DA (/Helv 10 Tf 0 g) /Rect [120 700 320 716] /F 4 >>
+endobj
+11 0 obj
+<< /Type /Annot /Subtype /Widget /P 3 0 R /FT /Btn /T (c_check)
+   /V /Off /AS /Off /Rect [120 660 134 674] /F 4 >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000141 00000 n 
+0000000198 00000 n 
+0000000356 00000 n 
+0000000472 00000 n 
+10 2
+0000000554 00000 n 
+0000000707 00000 n 
+trailer
+<< /Root 1 0 R /Size 12 >>
+startxref
+839
+%%EOF

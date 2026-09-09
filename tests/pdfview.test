@@ -202,4 +202,73 @@ test pdfview-5.3 {resizing does not break the bindings} -constraints havePdf -bo
     unset -nocomplain ::pdfviewBgError
 } -result {}
 
+set ::pvGruppe [file join [file dirname [file normalize [info script]]] \
+        fixtures form-gruppe.pdf]
+testConstraint havePvGruppe [file readable $::pvGruppe]
+
+# Kennt das GELADENE Modul die Option?
+#
+# Der Test lag im selben Paket wie das Modul, aber wer nur die Tests
+# auspackt, bekommt hier sonst
+#
+#     unknown option "-forms"  (TK LOOKUP OPTION -forms)
+#
+# aus der Tiefe des Hull-Widgets -- eine Meldung, die nach einem Fehler
+# im Widget aussieht und keiner ist. Der Name der Bedingung sagt es
+# statt dessen im Lauf: "skipped for havePvForms".
+testConstraint havePvForms [expr {
+    [testConstraint haveWidget]
+    && ![catch {
+        destroy .pvprobe
+        pdfview .pvprobe -forms 1
+        destroy .pvprobe
+    }]}]
+
+test pdfview-9.1 {pdfview zeichnet Formulare mit} \
+        -constraints {havePvGruppe havePvForms} -body {
+    # Bis 0.6.4 rief pdfview "pdfium::render" OHNE -forms 1. Ein
+    # eingebettetes Formular kam damit LEER heraus, waehrend
+    # app/viewer4.tcl dieselbe Datei mit Feldern zeigte -- wer einbettet,
+    # will dasselbe sehen.
+    #
+    # Gemessen: 770 dunkle Punkte mit, 602 ohne.
+    proc _pvDunkel {img} {
+        set n 0
+        for {set y 0} {$y < [image height $img]} {incr y 3} {
+            foreach z [$img data -from 0 $y [image width $img] \
+                    [expr {$y+1}]] {
+                foreach px $z { if {$px ne "#ffffff"} { incr n } }
+            }
+        }
+        return $n
+    }
+    proc _pvBild {w} {
+        foreach i [$w.c find all] {
+            if {[$w.c type $i] eq "image"} { return [$w.c itemcget $i -image] }
+        }
+        return ""
+    }
+    set zahlen {}
+    foreach f {1 0} {
+        destroy .pv91
+        pdfview .pv91 -file $::pvGruppe -forms $f -dpi 100
+        pack .pv91 -fill both -expand 1
+        update idletasks
+        update
+        lappend zahlen [_pvDunkel [_pvBild .pv91]]
+    }
+    destroy .pv91
+    rename _pvDunkel {} ; rename _pvBild {}
+    # Mit Formularen muss MEHR dastehen als ohne.
+    expr {[lindex $zahlen 0] > [lindex $zahlen 1]}
+} -result 1
+
+test pdfview-9.2 {-forms nimmt nur einen Wahrheitswert} \
+        -constraints {havePvGruppe havePvForms} -body {
+    destroy .pv92
+    catch {pdfview .pv92 -file $::pvGruppe -forms vielleicht} e
+    destroy .pv92
+    string match "*expects a boolean*" $e
+} -result 1
+
 ::tcltest::cleanupTests

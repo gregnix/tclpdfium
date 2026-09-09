@@ -39,6 +39,21 @@
  *   pdfium::savewithversion doc filename version ?flags? -> 0/1
  */
 
+/* localtime_r VERLANGT EIN POSIX-MERKMAL.
+ *
+ * Unter "gcc -std=c11 -Wall -Wextra" meldet der Uebersetzer
+ * "implicit declaration of function 'localtime_r'" -- die Voreinstellung
+ * gnu11 verdeckt das. Ein implizit erklaerter Funktionsaufruf ist in
+ * C99 und spaeter kein Warnhinweis, sondern ein Fehler, den nur die
+ * Nachsicht des Uebersetzers durchgehen laesst.
+ *
+ * 200809L ist POSIX.1-2008 und deckt localtime_r. Vor JEDEM include,
+ * sonst ist die Kopfdatei schon gelesen.
+ */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#  define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <tcl.h>
 #include <tk.h>
 #include <fpdfview.h>
@@ -56,6 +71,8 @@
 #include <fpdf_attachment.h>
 #include <fpdf_signature.h>
 #include <fpdf_fwlevent.h>
+#include <math.h>
+#include <time.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -104,6 +121,225 @@
 #else
 #  define PDFIUMTCL_EXPORT
 #endif
+
+/* Vorwaerts: pdfium::close steht weiter oben als die Tippsitzung und
+ * muss ihre Sitzungen trotzdem abbauen koennen. */
+static void _EditCloseAllFor(FPDF_DOCUMENT doc);
+
+/* ------------------------------------------------------------------ */
+/* EINE FORMULARUMGEBUNG JE DOKUMENT                                   */
+/*                                                                     */
+/* Bis 0.6.4 baute jeder Aufruf -- render, formfields, formfill,        */
+/* flatten -- seine eigene auf und wieder ab. Fuer eine Auskunft ist    */
+/* das nur verschwenderisch; sobald aber eine Tippsitzung laeuft, ist   */
+/* es falsch: PDFium vertraegt nur EINE je Dokument, und die zweite     */
+/* sieht die Felder nicht. Gemessen 07.09.2026 -- formfill meldete      */
+/* "could not fill", obwohl der Name stimmte.                           */
+/*                                                                     */
+/* Jetzt gehoert sie dem Dokument. Wer sie braucht, holt sie; gebaut    */
+/* wird sie beim ersten Mal, abgebaut von pdfium::close.                */
+/*                                                                     */
+/* Die Rueckrufstruktur liegt als ERSTES Feld: PDFium ruft mit ihrem    */
+/* Zeiger, und ein Umdeuten fuehrt zurueck.                             */
+/* ------------------------------------------------------------------ */
+#define PDFIUM_MAX_DOCFORM 32
+
+typedef struct PdfiumDocForm {
+    FPDF_FORMFILLINFO ffi;      /* MUSS das erste Feld sein */
+    FPDF_DOCUMENT     doc;
+    FPDF_FORMHANDLE   form;
+    FPDF_PAGE         curPage;  /* die Seite, die gerade offen ist */
+    int               curPageNum;
+    /* DIE SEITE DER TIPPSITZUNG.
+     *
+     * Jeder Form-Befehl laedt sich seine EIGENE Seite -- ein zweites
+     * Objekt derselben Seite -- und trug sie bisher in curPage ein.
+     * Danach meldete er sie ab und setzte curPage auf NULL. Waehrend
+     * einer Sitzung war das verheerend: FFI_GetPage gab NULL zurueck,
+     * PDFium fand die Seite nicht mehr, und editrender zeichnete die
+     * Feldinhalte nicht.
+     *
+     * Gemeldet 08.09.2026 mit sieben Bildschirmfotos: die Feldliste
+     * zeigte "muster" und "company", auf dem Blatt blieben Name und
+     * Firma LEER -- bis die Combobox benutzt wurde, denn die beendet
+     * die Sitzung und setzt sie neu auf.
+     *
+     * Solange hier eine Seite steht, gehoert curPage ihr. */
+    FPDF_PAGE         sessionPage;
+    int               sessionPageNum;
+    int               dirty;
+    double            dirtyL, dirtyT, dirtyR, dirtyB;
+    int               cursor;
+    int               changed;
+    int               timerId;
+} PdfiumDocForm;
+
+static PdfiumDocForm *pdfiumDocForms[PDFIUM_MAX_DOCFORM];
+static int pdfiumDocFormCount = 0;
+
+/* Die Rueckrufe. Sie merken sich, was PDFium meldet, und tun sonst
+ * nichts -- ein Zeitgeber, der wirklich blinkt, braucht die
+ * Ereignisschleife der Anwendung. */
+static void
+_DfInvalidate(FPDF_FORMFILLINFO *info, FPDF_PAGE page,
+              double left, double top, double right, double bottom)
+{
+    PdfiumDocForm *f = (PdfiumDocForm *)info;
+    (void)page;
+    f->dirty = 1;
+    f->dirtyL = left; f->dirtyT = top;
+    f->dirtyR = right; f->dirtyB = bottom;
+}
+
+static void
+_DfSetCursor(FPDF_FORMFILLINFO *info, int t)
+{
+    ((PdfiumDocForm *)info)->cursor = t;
+}
+
+static int
+_DfSetTimer(FPDF_FORMFILLINFO *info, int ms, TimerCallback cb)
+{
+    /* Null waere ein Fehlschlag fuer PDFium -- also eine Nummer. */
+    (void)ms; (void)cb;
+    return ++((PdfiumDocForm *)info)->timerId;
+}
+
+static void
+_DfKillTimer(FPDF_FORMFILLINFO *info, int id) { (void)info; (void)id; }
+
+static FPDF_SYSTEMTIME
+_DfGetLocalTime(FPDF_FORMFILLINFO *info)
+{
+    (void)info;
+    FPDF_SYSTEMTIME st;
+    memset(&st, 0, sizeof(st));
+    time_t jetzt = time(NULL);
+    struct tm tmv;
+#ifdef _WIN32
+    localtime_s(&tmv, &jetzt);
+#else
+    localtime_r(&jetzt, &tmv);
+#endif
+    st.wYear = (unsigned short)(tmv.tm_year + 1900);
+    st.wMonth = (unsigned short)(tmv.tm_mon + 1);
+    st.wDayOfWeek = (unsigned short)tmv.tm_wday;
+    st.wDay = (unsigned short)tmv.tm_mday;
+    st.wHour = (unsigned short)tmv.tm_hour;
+    st.wMinute = (unsigned short)tmv.tm_min;
+    st.wSecond = (unsigned short)tmv.tm_sec;
+    return st;
+}
+
+static FPDF_PAGE
+_DfGetPage(FPDF_FORMFILLINFO *info, FPDF_DOCUMENT doc, int idx)
+{
+    PdfiumDocForm *f = (PdfiumDocForm *)info;
+    /* Nur die Seite herausgeben, die ohnehin offen ist. Eine weitere zu
+     * laden hiesse, sie auch schliessen zu muessen -- und wer das
+     * vergisst, haelt sie bis zum Programmende. */
+    if (doc == f->doc && idx == f->curPageNum) return f->curPage;
+    return NULL;
+}
+
+static int
+_DfGetRotation(FPDF_FORMFILLINFO *info, FPDF_PAGE p)
+{ (void)info; (void)p; return 0; }
+
+static void
+_DfNamedAction(FPDF_FORMFILLINFO *info, FPDF_BYTESTRING a)
+{ (void)info; (void)a; }
+
+static FPDF_PAGE
+_DfGetCurrentPage(FPDF_FORMFILLINFO *info, FPDF_DOCUMENT doc)
+{
+    PdfiumDocForm *f = (PdfiumDocForm *)info;
+    return (doc == f->doc) ? f->curPage : NULL;
+}
+
+static void
+_DfOnChange(FPDF_FORMFILLINFO *info)
+{ ((PdfiumDocForm *)info)->changed = 1; }
+
+/* Die Umgebung eines Dokuments holen, beim ersten Mal bauen.
+ *
+ * SEITE UND NUMMER MUESSEN MIT.
+ *
+ * PDFium fragt schon WAEHREND InitFormFillEnvironment ueber FFI_GetPage
+ * nach der Seite. Steht dort noch NULL, kommt die Umgebung halb
+ * aufgebaut heraus, und das naechste FPDF_FFLDraw stuerzt ab.
+ *
+ * Gemessen 08.09.2026: "editbegin" gefolgt von "editrender" endete im
+ * Segmentierungsfehler -- aber nur, wenn editbegin die Umgebung baute.
+ * Lief vorher ein "render -forms 1", ging alles. Der Unterschied war
+ * nicht der Zeichenweg, sondern WER die Umgebung aufbaut und was er
+ * dabei ueber die Seite sagen kann.
+ */
+static PdfiumDocForm *
+_DocFormGet(FPDF_DOCUMENT doc, FPDF_PAGE page, int pagenum)
+{
+    for (int i = 0; i < pdfiumDocFormCount; i++) {
+        if (pdfiumDocForms[i]->doc != doc) continue;
+        /* Die Seite NUR nachziehen, wenn keine Sitzung sie haelt.
+         * Sonst zeigte FFI_GetPage auf ein Seitenobjekt, das der
+         * Aufrufer gleich wieder schliesst. */
+        if (!pdfiumDocForms[i]->sessionPage) {
+            pdfiumDocForms[i]->curPage = page;
+            pdfiumDocForms[i]->curPageNum = pagenum;
+        }
+        return pdfiumDocForms[i];
+    }
+    if (pdfiumDocFormCount >= PDFIUM_MAX_DOCFORM) return NULL;
+    PdfiumDocForm *f = (PdfiumDocForm *)ckalloc(sizeof(PdfiumDocForm));
+    memset(f, 0, sizeof(*f));
+    f->doc = doc;
+    /* VOR dem Aufbau setzen -- siehe oben. */
+    f->curPage = page;
+    f->curPageNum = pagenum;
+    f->ffi.version = 1;
+    f->ffi.FFI_Invalidate         = _DfInvalidate;
+    f->ffi.FFI_SetCursor          = _DfSetCursor;
+    f->ffi.FFI_SetTimer           = _DfSetTimer;
+    f->ffi.FFI_KillTimer          = _DfKillTimer;
+    f->ffi.FFI_GetLocalTime       = _DfGetLocalTime;
+    f->ffi.FFI_GetPage            = _DfGetPage;
+    f->ffi.FFI_GetRotation        = _DfGetRotation;
+    f->ffi.FFI_ExecuteNamedAction = _DfNamedAction;
+    f->ffi.FFI_GetCurrentPage     = _DfGetCurrentPage;
+    f->ffi.FFI_OnChange           = _DfOnChange;
+    f->form = FPDFDOC_InitFormFillEnvironment(doc, &f->ffi);
+    if (!f->form) { ckfree((char *)f); return NULL; }
+    pdfiumDocForms[pdfiumDocFormCount++] = f;
+    return f;
+}
+
+/* Beim Schliessen des Dokuments. */
+/* Nach dem Abmelden einer transienten Seite: die Sitzungsseite wieder
+ * eintragen, sonst gar keine.
+ *
+ * Stand an fuenf Stellen wortgleich. Eine Regel an fuenf Stellen ist
+ * eine Regel, die an vier Stellen vergessen wird -- und genau das war
+ * der Fehler, den sie behebt.
+ */
+static void
+_DocFormSeiteAb(PdfiumDocForm *f)
+{
+    if (!f) return;
+    f->curPage = f->sessionPage;
+    f->curPageNum = f->sessionPage ? f->sessionPageNum : -1;
+}
+
+static void
+_DocFormFree(FPDF_DOCUMENT doc)
+{
+    for (int i = 0; i < pdfiumDocFormCount; i++) {
+        if (pdfiumDocForms[i]->doc != doc) continue;
+        FPDFDOC_ExitFormFillEnvironment(pdfiumDocForms[i]->form);
+        ckfree((char *)pdfiumDocForms[i]);
+        pdfiumDocForms[i] = pdfiumDocForms[--pdfiumDocFormCount];
+        return;
+    }
+}
 
 /* ------------------------------------------------------------------ */
 /* Hilfsmakro: Fehler setzen und TCL_ERROR zurückgeben                 */
@@ -159,6 +395,28 @@ PdfiumCloseCmd(ClientData cd, Tcl_Interp *interp,
     if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK)
         return TCL_ERROR;
 
+    /* OFFENE TIPPSITZUNGEN ZUERST BEENDEN.
+     *
+     * Ohne das zeigten Sitzung, Formularumgebung und Seite auf ein
+     * freigegebenes Dokument. Gemessen 08.09.2026: "editchar" danach
+     * lief DURCH -- kein Fehler, kein Absturz. Ein Fehler, der nicht
+     * auffaellt und irgendwann woanders zuschlaegt.
+     *
+     * Beenden statt ablehnen: wer ein Dokument schliesst, will es los
+     * sein. Die Sitzung merkt sich, dass sie tot ist, und ein spaeterer
+     * Aufruf sagt das. */
+    _EditCloseAllFor((FPDF_DOCUMENT)(intptr_t)ptr);
+    /* UND DIE FORMULARUMGEBUNG DES DOKUMENTS.
+     *
+     * Sie zu vergessen ist teurer als ein Leck: PDFium vergibt fuer ein
+     * neues Dokument gern DIESELBE Adresse, und dann findet
+     * _DocFormGet den alten Eintrag -- eine Umgebung, die auf ein
+     * freigegebenes Dokument zeigt.
+     *
+     * Gemessen 08.09.2026: der erste Durchgang tippte, der zweite auf
+     * einer frisch geoeffneten Datei nicht. Der Klick meldete einen
+     * Treffer, und es kam nichts an. */
+    _DocFormFree((FPDF_DOCUMENT)(intptr_t)ptr);
     FPDF_CloseDocument((FPDF_DOCUMENT)(intptr_t)ptr);
     return TCL_OK;
 }
@@ -382,12 +640,19 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
      * gezeichnet, also erst weiter unten -- hier nur aufgebaut, damit im
      * Fehlerfall nichts halb fertig ist. */
     FPDF_FORMHANDLE form = NULL;
+    PdfiumDocForm *df = NULL;
     if (withForms) {
-        FPDF_FORMFILLINFO ffi;
-        memset(&ffi, 0, sizeof(ffi));
-        ffi.version = 1;
-        form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
-        if (form) FORM_OnAfterLoadPage(page, form);
+        /* DIE UMGEBUNG DES DOKUMENTS.
+         *
+         * Solange render sich eine eigene baute, kamen das gewoehnliche
+         * Bild und das Tippbild aus VERSCHIEDENEN Umgebungen -- dasselbe
+         * Feld sah je nach Weg anders aus. Das ist Anzeige, nicht
+         * Ordnungsliebe. */
+        df = _DocFormGet(doc, page, pagenum);
+        if (df) {
+            form = df->form;
+            FORM_OnAfterLoadPage(page, form);
+        }
     }
     if (haveClip) {
         /* Mit Matrix: verschieben, damit die linke untere Ecke des
@@ -414,8 +679,14 @@ PdfiumRenderCmd(ClientData cd, Tcl_Interp *interp,
         }
     }
     if (form) {
+        /* Nur die SEITE abmelden -- die Umgebung gehoert dem Dokument
+         * und wird von pdfium::close abgebaut. */
         FORM_OnBeforeClosePage(page, form);
-        FPDFDOC_ExitFormFillEnvironment(form);
+        if (df) {
+            /* Die Seite der Sitzung wieder eintragen, wenn es eine
+             * gibt -- sonst faende FFI_GetPage nichts mehr. */
+            _DocFormSeiteAb(df);
+        }
         form = NULL;
     }
 
@@ -798,10 +1069,10 @@ _ToUtf16(Tcl_Obj *obj, Tcl_DString *ds)
 /*   pdfium::editrender $s -dpi 100 -imagename ::bild                  */
 /*   pdfium::editend    $s                                             */
 /*                                                                     */
-/* WARUM EINE SITZUNG: alle anderen Befehle bauen die Formularumgebung  */
-/* je Aufruf auf und wieder ab. Fuers Zeichnen ist das richtig, nur     */
-/* verschwenderisch. Beim TIPPEN nicht: Fokus, Schreibmarke und ein     */
-/* halb getipptes Feld sind ZUSTAND, und der ist nach jedem Aufruf weg. */
+/* WARUM EINE SITZUNG: Fokus, Schreibmarke und ein halb getipptes Feld  */
+/* sind ZUSTAND. Die Formularumgebung gehoert seit 0.6.4 dem Dokument   */
+/* und bleibt stehen; was fehlt, ist jemand, der die SEITE offenhaelt   */
+/* und weiss, wo die Schreibmarke sitzt.                                */
 /*                                                                     */
 /* Die Sitzung haelt Umgebung UND Seite offen, solange getippt wird.    */
 /* Die Lebensdauer steht damit im Aufrufer und nicht in einer stillen   */
@@ -811,13 +1082,103 @@ _ToUtf16(Tcl_Obj *obj, Tcl_DString *ds)
 /* mehrere Seiten offenzuhalten und den Fokus zwischen ihnen zu         */
 /* verwalten -- das waere eine zweite Sache unter demselben Namen.      */
 /* ------------------------------------------------------------------ */
+/* Die offenen Tippsitzungen.
+ *
+ * PDFium vertraegt nur EINE Formularumgebung je Dokument. Bis 0.6.4
+ * baute sich jeder Befehl seine eigene, und wer waehrend einer Sitzung
+ * "formfill" rief, bekam eine zweite -- die sah die Felder nicht:
+ * "could not fill on page 0: kunde", obwohl das Feld da war. Seit die
+ * Umgebung dem Dokument gehoert, geht beides nebeneinander (2.79).
+ *
+ * Das Verzeichnis bleibt: eine ZWEITE Sitzung auf demselben Dokument
+ * ist weiterhin falsch, weil beide sich Fokus und Schreibmarke teilen
+ * wuerden (2.84).
+ *
+ * Diese Meldung schickt den Leser in die falsche Richtung. Er sucht den
+ * Namen, und der ist richtig. Darum wird die Lage GENANNT.
+ *
+ * Eine feste Zahl reicht: mehr als eine Handvoll Dokumente hat niemand
+ * gleichzeitig offen, und eine wachsende Liste waere Verwaltung fuer
+ * einen Fall, den es nicht gibt.
+ */
+#define PDFIUM_MAX_EDIT 16
+/* Die Sitzung.
+ *
+ * Sie BESITZT weder Umgebung noch Rueckrufe -- beides gehoert dem
+ * Dokument (PdfiumDocForm). Dort liegt die FPDF_FORMFILLINFO als
+ * erstes Feld, damit PDFium mit ihrem Zeiger zurueckfindet.
+ *
+ * Bis 0.6.4 lag sie hier, und die Sitzung hatte eigene Rueckrufe --
+ * doppelt und, sobald zwei Umgebungen lebten, schaedlich.
+ *
+ * Was die Sitzung haelt: die SEITE und die Zuordnung zur Umgebung.
+ */
 typedef struct PdfiumEdit {
-    FPDF_DOCUMENT       doc;
+    PdfiumDocForm      *df;    /* die Umgebung des Dokuments */
+    FPDF_DOCUMENT       doc;   /* NULL = das Dokument ist zu */
     FPDF_PAGE           page;
-    FPDF_FORMHANDLE     form;
-    FPDF_FORMFILLINFO  *ffi;   /* lebt so lange wie die Umgebung */
+    FPDF_FORMHANDLE     form;  /* == df->form, der Kuerze halber */
     int                 pagenum;
 } PdfiumEdit;
+
+/* Die Rueckrufe stehen bei der Dokumentumgebung (_Df*). Die Sitzung
+ * hatte bis 0.6.4 eigene (_Ffi*) -- doppelt und, sobald beide lebten,
+ * schaedlich. */
+
+static PdfiumEdit *pdfiumEditList[PDFIUM_MAX_EDIT];
+static int pdfiumEditCount = 0;
+
+static int
+_EditSessionOpen(FPDF_DOCUMENT doc)
+{
+    for (int i = 0; i < pdfiumEditCount; i++) {
+        if (pdfiumEditList[i] && pdfiumEditList[i]->doc == doc) return 1;
+    }
+    return 0;
+}
+
+/* Eine Sitzung abbauen und das Dokument auf NULL setzen, damit ein
+ * spaeterer Aufruf es MERKT.
+ *
+ * Ohne das lief "editchar" nach "pdfium::close" einfach durch --
+ * gemessen 08.09.2026: kein Fehler, kein Absturz, Zugriff auf
+ * freigegebenen Speicher. Das schlechteste Ergebnis, das ein Fehler
+ * haben kann: er faellt nicht auf und schlaegt irgendwann woanders zu.
+ *
+ * Den Fokus VOR dem Schliessen abgeben -- PDFium schreibt den
+ * Feldinhalt beim Fokusverlust fest. */
+static void
+_EditTeardown(PdfiumEdit *e)
+{
+    if (!e || !e->doc) return;
+    FORM_ForceToKillFocus(e->form);
+    FORM_OnBeforeClosePage(e->page, e->form);
+    /* Die Umgebung NICHT abbauen -- sie gehoert dem Dokument und wird
+     * von pdfium::close freigegeben. Bis 0.6.4 gehoerte sie der
+     * Sitzung, und jeder andere Aufruf baute sich eine zweite. */
+    if (e->df) {
+        if (e->df->sessionPage == e->page) {
+            e->df->sessionPage = NULL;
+            e->df->sessionPageNum = -1;
+        }
+        if (e->df->curPage == e->page) {
+            e->df->curPage = NULL;
+            e->df->curPageNum = -1;
+        }
+    }
+    FPDF_ClosePage(e->page);
+    e->doc = NULL; e->page = NULL; e->form = NULL; e->df = NULL;
+}
+
+static void
+_EditCloseAllFor(FPDF_DOCUMENT doc)
+{
+    for (int i = 0; i < pdfiumEditCount; i++) {
+        if (pdfiumEditList[i] && pdfiumEditList[i]->doc == doc) {
+            _EditTeardown(pdfiumEditList[i]);
+        }
+    }
+}
 
 static int
 PdfiumEditBeginCmd(ClientData cd, Tcl_Interp *interp,
@@ -839,25 +1200,44 @@ PdfiumEditBeginCmd(ClientData cd, Tcl_Interp *interp,
     FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
     if (!page) PDFIUM_ERROR(interp, "cannot load page");
 
-    FPDF_FORMFILLINFO *ffi =
-        (FPDF_FORMFILLINFO *)ckalloc(sizeof(FPDF_FORMFILLINFO));
-    memset(ffi, 0, sizeof(*ffi));
-    ffi->version = 1;
-    /* Die Struktur muss die Sitzung ueberleben: PDFium haelt einen Zeiger
-     * darauf. Eine lokale Variable waere nach editbegin weg, und der
-     * naechste Tastendruck liefe in den Speicher, der ihr mal gehoerte --
-     * ein Fehler, der lange gutgeht und dann nicht. */
-    FPDF_FORMHANDLE form = FPDFDOC_InitFormFillEnvironment(doc, ffi);
-    if (!form) {
-        ckfree((char *)ffi);
+    /* KEINE ZWEITE SITZUNG AUF DEMSELBEN DOKUMENT.
+     *
+     * Die Umgebung gehoert dem Dokument, also teilten sich zwei
+     * Sitzungen dieselbe -- und mit ihr Fokus und Schreibmarke. Wer in
+     * der einen tippt, aendert die andere mit, und "editend" der ersten
+     * meldet die Seite ab, waehrend die zweite sie noch braucht.
+     *
+     * formfill prueft das seit 0.6.4 nicht mehr (es geht jetzt
+     * nebeneinander); hier ist es weiterhin falsch. */
+    if (_EditSessionOpen(doc)) {
+        FPDF_ClosePage(page);
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "editbegin: a session is already open on this document --"
+            " call editend first", -1));
+        return TCL_ERROR;
+    }
+    PdfiumDocForm *df = _DocFormGet(doc, page, pagenum);
+    if (!df) {
         FPDF_ClosePage(page);
         PDFIUM_ERROR(interp, "cannot init form environment");
     }
-    FORM_OnAfterLoadPage(page, form);
-
     PdfiumEdit *e = (PdfiumEdit *)ckalloc(sizeof(PdfiumEdit));
-    e->doc = doc; e->page = page; e->form = form; e->ffi = ffi;
-    e->pagenum = pagenum;
+    memset(e, 0, sizeof(*e));
+    e->df = df;
+    e->doc = doc; e->page = page; e->pagenum = pagenum;
+    e->form = df->form;
+    FPDF_FORMHANDLE form = e->form;
+    /* Die Seite anmelden, damit FFI_GetPage sie herausgeben kann --
+     * und als SITZUNGSSEITE merken, damit kein anderer Befehl sie
+     * ueberschreibt. */
+    df->curPage = page;
+    df->curPageNum = pagenum;
+    df->sessionPage = page;
+    df->sessionPageNum = pagenum;
+    FORM_OnAfterLoadPage(page, form);
+    if (pdfiumEditCount < PDFIUM_MAX_EDIT) {
+        pdfiumEditList[pdfiumEditCount++] = e;
+    }
     Tcl_SetObjResult(interp, Tcl_NewWideIntObj((Tcl_WideInt)(intptr_t)e));
     return TCL_OK;
 }
@@ -867,7 +1247,15 @@ _EditFromObj(Tcl_Interp *interp, Tcl_Obj *obj)
 {
     Tcl_WideInt w;
     if (Tcl_GetWideIntFromObj(interp, obj, &w) != TCL_OK) return NULL;
-    return (PdfiumEdit *)(intptr_t)w;
+    PdfiumEdit *e = (PdfiumEdit *)(intptr_t)w;
+    /* Nach "pdfium::close" ist doc NULL. Weiterzuarbeiten hiesse, auf
+     * freigegebenem Speicher zu tippen -- und das geht eine Weile gut. */
+    if (e && !e->doc) {
+        Tcl_SetObjResult(interp, Tcl_NewStringObj(
+            "this edit session is over: the document was closed", -1));
+        return NULL;
+    }
+    return e;
 }
 
 static int
@@ -891,7 +1279,27 @@ PdfiumEditClickCmd(ClientData cd, Tcl_Interp *interp,
      * nicht funktioniert. */
     int hat = FPDFPage_HasFormFieldAtPoint(e->form, e->page, x, y);
     if (hat < 0) hat = 0;
-    if (hat) {
+
+    /* EIN OFFENES AUFKLAPPMENUE LIEGT NICHT AUF EINEM FELD.
+     *
+     * PDFium zeichnet die Liste einer Combobox selbst, unterhalb des
+     * Feldes. Ein Klick auf "Artikel B" landet dort AUSSERHALB jedes
+     * Widget-Rechtecks -- HasFormFieldAtPoint sagt nein, und der Klick
+     * wurde verschluckt. Auf dem Bildschirm blieb die Liste offen und
+     * reagierte auf nichts mehr.
+     *
+     * Gemeldet 08.09.2026 mit zwei Bildschirmfotos: Pfeil geklickt,
+     * Liste geht auf, danach tut die Maus nichts.
+     *
+     * Der Klick geht darum IMMER an PDFium. Ob etwas geschehen ist,
+     * sagt PDFium selbst ueber FFI_Invalidate -- dafuer sind die
+     * Rueckrufe da. Der frueher befuerchtete Fall (ein Klick ins Leere
+     * nimmt still den Fokus) ist dabei kein Verlust, sondern richtig:
+     * so schliesst man eine offene Liste.
+     */
+    int warDirty = e->df ? e->df->dirty : 0;
+    if (e->df) e->df->dirty = 0;
+    {
         /* Erst die Maus BEWEGEN, dann druecken.
          *
          * Ein Betrachter schickt vor jedem Klick Bewegungen, und PDFium
@@ -908,7 +1316,28 @@ PdfiumEditClickCmd(ClientData cd, Tcl_Interp *interp,
         FORM_OnLButtonDown(e->form, e->page, 0, x, y);
         FORM_OnLButtonUp(e->form, e->page, 0, x, y);
     }
-    Tcl_SetObjResult(interp, Tcl_NewIntObj(hat ? 1 : 0));
+    /* Getroffen heisst: dort lag ein Feld ODER PDFium hat auf den Klick
+     * hin etwas neu zu zeichnen verlangt. Das zweite faengt den
+     * Listeneintrag, den das erste nicht sieht. */
+    int reagiert = (e->df && e->df->dirty) ? 1 : 0;
+    if (e->df && warDirty) e->df->dirty = 1;
+    /* DREI ANTWORTEN, NICHT ZWEI.
+     *
+     *   0  dort war nichts, und PDFium hat nichts zu tun
+     *   1  dort lag ein Feld -- Schreibmarke gesetzt, es geht weiter
+     *   2  dort lag KEIN Feld, PDFium hat trotzdem reagiert
+     *
+     * Der dritte Fall ist der Eintrag in einer offenen Aufklappliste.
+     * Der Aufrufer muss ihn kennen: nach einer Wahl ist die Eingabe
+     * FERTIG, und der Wert wird erst beim Fokusverlust festgeschrieben.
+     * Wer das nicht weiss, zeigt weiter das leere Feld -- und der
+     * Benutzer haelt es fuer nicht gespeichert.
+     *
+     * Gemeldet 08.09.2026 mit drei Bildschirmfotos: gewaehlt, im Feld
+     * sichtbar, danach wieder leer. In der Datei stand der Wert.
+     */
+    Tcl_SetObjResult(interp,
+            Tcl_NewIntObj(hat ? 1 : (reagiert ? 2 : 0)));
     return TCL_OK;
 }
 
@@ -1001,6 +1430,130 @@ PdfiumEditKeyCmd(ClientData cd, Tcl_Interp *interp,
     return TCL_OK;
 }
 
+/* ------------------------------------------------------------------ */
+/* pdfium::editstate session                                           */
+/*                                                                     */
+/* Was PDFium waehrend der Sitzung gemeldet hat:                       */
+/*                                                                     */
+/*   dirty   1, wenn ein Bereich neu zu zeichnen ist                   */
+/*   rect    {links oben rechts unten} dieses Bereichs                 */
+/*   cursor  zuletzt gewuenschte Zeigerform (0 Pfeil, 3 Textmarke)     */
+/*   changed 1, wenn sich ein Feldwert geaendert hat                   */
+/*                                                                     */
+/* WOZU: bis 0.6.4 zeichnete der Aufrufer nach jedem Tastendruck die   */
+/* ganze Seite neu, weil er nicht wusste, was sich geaendert hat. Jetzt */
+/* sagt es PDFium selbst -- ueber FFI_Invalidate.                       */
+/*                                                                     */
+/* Das Lesen setzt "dirty" ZURUECK. Sonst muesste der Aufrufer es tun, */
+/* und wer es vergisst, zeichnet fuer immer neu.                       */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumEditStateCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session");
+        return TCL_ERROR;
+    }
+    PdfiumEdit *e = _EditFromObj(interp, objv[1]);
+    if (!e) return TCL_ERROR;
+    Tcl_Obj *d = Tcl_NewListObj(0, NULL);
+#define ES_PUT(k, v) do { \
+        Tcl_ListObjAppendElement(interp, d, Tcl_NewStringObj((k), -1)); \
+        Tcl_ListObjAppendElement(interp, d, (v)); \
+    } while (0)
+    ES_PUT("dirty", Tcl_NewIntObj(e->df->dirty));
+    Tcl_Obj *r = Tcl_NewListObj(0, NULL);
+    if (e->df->dirty) {
+        Tcl_ListObjAppendElement(interp, r, Tcl_NewDoubleObj(e->df->dirtyL));
+        Tcl_ListObjAppendElement(interp, r, Tcl_NewDoubleObj(e->df->dirtyT));
+        Tcl_ListObjAppendElement(interp, r, Tcl_NewDoubleObj(e->df->dirtyR));
+        Tcl_ListObjAppendElement(interp, r, Tcl_NewDoubleObj(e->df->dirtyB));
+    }
+    ES_PUT("rect", r);
+    ES_PUT("cursor", Tcl_NewIntObj(e->df->cursor));
+    ES_PUT("changed", Tcl_NewIntObj(e->df->changed));
+#undef ES_PUT
+    e->df->dirty = 0;
+    e->df->changed = 0;
+    Tcl_SetObjResult(interp, d);
+    return TCL_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* pdfium::edittext session                                            */
+/*                                                                     */
+/* Der Text, der GERADE im Feld steht -- vor dem Festschreiben.        */
+/*                                                                     */
+/* WOZU: PDFium schreibt einen Feldwert erst beim Fokusverlust fest.   */
+/* Wer tippt, sieht die Buchstaben auf der Seite, und "formfields"     */
+/* meldet weiter den alten Wert. Im Mitschnitt vom 08.09.2026 stand    */
+/* nach jedem editchar wieder "f_name {}" -- bis ein Tab kam, dann     */
+/* "f_name fg". Auf dem Bildschirm sieht das aus, als komme nichts an. */
+/*                                                                     */
+/* Den Fokus dafuer abzugeben waere falsch: dann koennte man nicht     */
+/* weitertippen. FORM_GetFocusedText fragt PDFium direkt.              */
+/*                                                                     */
+/* Leere Rueckgabe heisst: kein Feld hat den Fokus.                    */
+/* ------------------------------------------------------------------ */
+static int
+PdfiumEditTextCmd(ClientData cd, Tcl_Interp *interp,
+                  int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc != 2) {
+        Tcl_WrongNumArgs(interp, 1, objv, "session");
+        return TCL_ERROR;
+    }
+    PdfiumEdit *e = _EditFromObj(interp, objv[1]);
+    if (!e) return TCL_ERROR;
+    /* MIT DEM NAMEN DES FELDES.
+     *
+     * Der Text allein reicht nicht. Ein Aufrufer, der ihn in eine
+     * Feldliste eintraegt, muss wissen WOHIN -- und nach einem Tab
+     * wandert der Fokus, waehrend die Auswahl in der Liste stehen
+     * bleibt.
+     *
+     * Gemessen 08.09.2026 an einem Mitschnitt: "edittext -> 1" nach
+     * mehreren Tabs. Das war der Inhalt von f_menge, und er landete in
+     * der Zeile, die der Benutzer zuletzt angeklickt hatte. Auf dem
+     * Bildschirm hatten "ploetzlich auch die anderen Felder Daten".
+     *
+     * Rueckgabe: {name text}. Beides leer heisst: nichts hat den Fokus.
+     */
+    Tcl_Obj *paar = Tcl_NewListObj(0, NULL);
+    Tcl_Obj *name = Tcl_NewStringObj("", 0);
+    Tcl_IncrRefCount(name);
+    FPDF_ANNOTATION fa = NULL;
+    int seite = 0;
+    if (FORM_GetFocusedAnnot(e->form, &seite, &fa) && fa) {
+        unsigned long nl = FPDFAnnot_GetFormFieldName(e->form, fa, NULL, 0);
+        if (nl > 2) {
+            unsigned short *nb = (unsigned short *)ckalloc(nl);
+            FPDFAnnot_GetFormFieldName(e->form, fa, nb, nl);
+            Tcl_DecrRefCount(name);
+            name = _AnnotUtf16ToObj(interp, nb, nl);
+            ckfree((char *)nb);
+        }
+        FPDFPage_CloseAnnot(fa);
+    }
+    Tcl_ListObjAppendElement(interp, paar, name);
+
+    unsigned long len = FORM_GetFocusedText(e->form, e->page, NULL, 0);
+    if (len > 2) {
+        unsigned short *buf = (unsigned short *)ckalloc(len);
+        FORM_GetFocusedText(e->form, e->page, buf, len);
+        Tcl_ListObjAppendElement(interp, paar,
+                _AnnotUtf16ToObj(interp, buf, len));
+        ckfree((char *)buf);
+    } else {
+        Tcl_ListObjAppendElement(interp, paar, Tcl_NewStringObj("", 0));
+    }
+    Tcl_SetObjResult(interp, paar);
+    return TCL_OK;
+}
+
 static int
 PdfiumEditEndCmd(ClientData cd, Tcl_Interp *interp,
                  int objc, Tcl_Obj *const objv[])
@@ -1016,13 +1569,13 @@ PdfiumEditEndCmd(ClientData cd, Tcl_Interp *interp,
      * des Feldes beim Fokusverlust fest. Ohne das ginge das zuletzt
      * getippte Feld verloren -- und zwar genau das, an dem man gerade
      * gearbeitet hat. */
-    FORM_ForceToKillFocus(e->form);
-    FORM_OnBeforeClosePage(e->page, e->form);
-    FPDFDOC_ExitFormFillEnvironment(e->form);
-    FPDF_ClosePage(e->page);
-    /* Erst NACH ExitFormFillEnvironment: PDFium haelt bis dahin einen
-     * Zeiger auf die Struktur. */
-    ckfree((char *)e->ffi);
+    _EditTeardown(e);
+    for (int i = 0; i < pdfiumEditCount; i++) {
+        if (pdfiumEditList[i] == e) {
+            pdfiumEditList[i] = pdfiumEditList[--pdfiumEditCount];
+            break;
+        }
+    }
     ckfree((char *)e);
     return TCL_OK;
 }
@@ -1033,11 +1586,15 @@ PdfiumEditEndCmd(ClientData cd, Tcl_Interp *interp,
 /*                                                                     */
 /* Die Seite einer Sitzung zeichnen -- MIT deren Formularumgebung.      */
 /*                                                                     */
-/* WARUM EIGENS: "render -forms 1" baut sich seine EIGENE Umgebung auf. */
-/* Die kennt den Sitzungszustand nicht, also auch nicht, was gerade     */
-/* getippt und noch nicht festgeschrieben ist. Gemessen: waehrend einer */
-/* Sitzung drei Zeichen getippt, das Bild blieb bei 1406 dunklen        */
+/* WARUM EIGENS: "render -forms 1" zeichnet ueber ein eigenes,          */
+/* transientes Seitenobjekt und zeigt den FESTGESCHRIEBENEN Stand.      */
+/* PDFium schreibt einen Feldwert erst beim Fokusverlust fest -- also   */
+/* sieht render nicht, was gerade getippt wird. Gemessen: waehrend      */
+/* einer Sitzung drei Zeichen getippt, das Bild blieb bei 1406 dunklen  */
 /* Punkten; erst nach "editend" waren es 1503.                          */
+/*                                                                     */
+/* (Bis 0.6.4 baute render sich zusaetzlich eine eigene Umgebung. Das   */
+/* ist vorbei -- es gibt eine je Dokument. Der Grund hier bleibt.)      */
 /*                                                                     */
 /* Man tippte also BLIND. Das ist kein Schoenheitsfehler -- wer nicht   */
 /* sieht, was er schreibt, kann es auch nicht berichtigen.              */
@@ -1052,6 +1609,23 @@ PdfiumEditRenderCmd(ClientData cd, Tcl_Interp *interp,
                 "session ?-dpi n? ?-imagename name?");
         return TCL_ERROR;
     }
+    /* TK-STUBS EINRICHTEN.
+     *
+     * Sie werden verzoegert geholt (EnsureTk) -- nur wer ein Tk-Bild
+     * anfasst, braucht sie. "render" tut das seit jeher; "editrender"
+     * war ein zweiter Weg zu Tk_FindPhoto und hat es vergessen.
+     *
+     * Die Folge war kein Fehler, sondern ein SEGMENTIERUNGSFEHLER: die
+     * Funktionszeiger der Stubs zeigen ins Leere, solange sie niemand
+     * geholt hat. Und es fiel lange nicht auf, weil in der Suite und im
+     * Viewer IMMER erst gezeichnet wird -- gemessen: ein
+     * "render -dpi 100" davor, und editrender laeuft.
+     *
+     * Ein Absturz, der nur beim ersten Aufruf auftritt, ist der
+     * unangenehmste: er trifft den, der die Bindung neu benutzt.
+     */
+    if (EnsureTk(interp) != TCL_OK) return TCL_ERROR;
+
     PdfiumEdit *e = _EditFromObj(interp, objv[1]);
     if (!e) return TCL_ERROR;
 
@@ -1186,17 +1760,16 @@ PdfiumFormFillCmd(ClientData cd, Tcl_Interp *interp,
     }
 
     FPDF_DOCUMENT doc  = (FPDF_DOCUMENT)(intptr_t)ptr;
+
     FPDF_PAGE     page = FPDF_LoadPage(doc, pagenum);
     if (!page) PDFIUM_ERROR(interp, "cannot load page");
 
-    FPDF_FORMFILLINFO ffi;
-    memset(&ffi, 0, sizeof(ffi));
-    ffi.version = 1;
-    FPDF_FORMHANDLE form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
-    if (!form) {
+    PdfiumDocForm *df = _DocFormGet(doc, page, pagenum);
+    if (!df) {
         FPDF_ClosePage(page);
         PDFIUM_ERROR(interp, "cannot init form environment");
     }
+    FPDF_FORMHANDLE form = df->form;
     FORM_OnAfterLoadPage(page, form);
 
     int gefuellt = 0;
@@ -1221,6 +1794,7 @@ PdfiumFormFillCmd(ClientData cd, Tcl_Interp *interp,
                 unsigned short *nb = (unsigned short *)ckalloc(nlen);
                 FPDFAnnot_GetFormFieldName(form, annot, nb, nlen);
                 Tcl_Obj *nm = _AnnotUtf16ToObj(interp, nb, nlen);
+                Tcl_IncrRefCount(nm);
                 ckfree((char *)nb);
                 passt = (strcmp(Tcl_GetString(nm), wunschName) == 0);
                 Tcl_DecrRefCount(nm);
@@ -1255,11 +1829,108 @@ PdfiumFormFillCmd(ClientData cd, Tcl_Interp *interp,
                  * Optionsfeld wird darum gemeldet statt still zu
                  * scheitern.
                  */
+                /* EIN OPTIONSFELD WIRD BEIM NAMEN GENANNT.
+                 *
+                 * Eine Gruppe teilt sich einen Namen; welche Option
+                 * gemeint ist, sagt der EXPORTWERT des einzelnen
+                 * Widgets (/normal, /express, ...). Bis hierher nahm
+                 * formfill nur einen Wahrheitswert -- und der waehlte
+                 * immer das erste Widget. "express" war nicht
+                 * ansprechbar, und der Aufrufer bekam
+                 *
+                 *     "prio" is a radio button and takes a boolean
+                 *
+                 * was ihn in die falsche Richtung schickte: nicht der
+                 * Wert war falsch, sondern der Weg fehlte.
+                 *
+                 * Erst wird nach dem Exportwert gesucht. Nur wenn
+                 * keiner passt UND der Wert ein Wahrheitswert ist,
+                 * bleibt es beim alten Verhalten -- sonst braeche eine
+                 * bestehende Verwendung mit "1".
+                 */
+                if (typ == FPDF_FORMFIELD_RADIOBUTTON) {
+                    const char *wunsch = Tcl_GetString(wv[k+1]);
+                    FPDF_ANNOTATION treffer = NULL;
+                    Tcl_Obj *erlaubt = Tcl_NewListObj(0, NULL);
+                    int na2 = FPDFPage_GetAnnotCount(page);
+                    for (int q = 0; q < na2; q++) {
+                        FPDF_ANNOTATION a2 = FPDFPage_GetAnnot(page, q);
+                        if (!a2) continue;
+                        unsigned long nl2 =
+                            FPDFAnnot_GetFormFieldName(form, a2, NULL, 0);
+                        int gleicherName = 0;
+                        if (nl2 > 2) {
+                            unsigned short *nb2 =
+                                (unsigned short *)ckalloc(nl2);
+                            FPDFAnnot_GetFormFieldName(form, a2, nb2, nl2);
+                            Tcl_Obj *nm2 = _AnnotUtf16ToObj(interp, nb2, nl2);
+                            Tcl_IncrRefCount(nm2);
+                            ckfree((char *)nb2);
+                            gleicherName = (strcmp(Tcl_GetString(nm2),
+                                                   wunschName) == 0);
+                            Tcl_DecrRefCount(nm2);
+                        }
+                        if (gleicherName) {
+                            unsigned long el =
+                                FPDFAnnot_GetFormFieldExportValue(form, a2,
+                                                                  NULL, 0);
+                            if (el > 2) {
+                                unsigned short *eb =
+                                    (unsigned short *)ckalloc(el);
+                                FPDFAnnot_GetFormFieldExportValue(form, a2,
+                                                                  eb, el);
+                                Tcl_Obj *ex = _AnnotUtf16ToObj(interp, eb, el);
+                                ckfree((char *)eb);
+                                Tcl_ListObjAppendElement(interp, erlaubt, ex);
+                                if (!treffer
+                                        && strcmp(Tcl_GetString(ex),
+                                                  wunsch) == 0) {
+                                    treffer = a2;
+                                    continue;   /* nicht schliessen */
+                                }
+                            }
+                        }
+                        FPDFPage_CloseAnnot(a2);
+                    }
+                    if (treffer) {
+                        if (!FPDFAnnot_IsChecked(form, treffer)) {
+                            FS_RECTF r2;
+                            if (FPDFAnnot_GetRect(treffer, &r2)) {
+                                double cx = (r2.left + r2.right) / 2.0;
+                                double cy = (r2.top + r2.bottom) / 2.0;
+                                FORM_OnMouseMove(form, page, 0, cx, cy);
+                                FORM_OnLButtonDown(form, page, 0, cx, cy);
+                                FORM_OnLButtonUp(form, page, 0, cx, cy);
+                            }
+                        }
+                        FORM_ForceToKillFocus(form);
+                        FPDFPage_CloseAnnot(treffer);
+                        FPDFPage_CloseAnnot(annot);
+                        gefuellt++;
+                        getroffen = 1;
+                        break;
+                    }
+                    int istWahr;
+                    if (Tcl_GetBooleanFromObj(NULL, wv[k+1],
+                                              &istWahr) != TCL_OK) {
+                        Tcl_Size ne2;
+                        Tcl_ListObjLength(interp, erlaubt, &ne2);
+                        Tcl_ListObjAppendElement(interp, fehlend,
+                            Tcl_ObjPrintf("%s (no such option%s%s)",
+                                wunschName,
+                                ne2 ? "; allowed: " : "",
+                                ne2 ? Tcl_GetString(erlaubt) : ""));
+                        FPDFPage_CloseAnnot(annot);
+                        getroffen = 1;
+                        break;
+                    }
+                }
+
                 int soll;
                 if (Tcl_GetBooleanFromObj(interp, wv[k+1], &soll) != TCL_OK) {
                     FPDFPage_CloseAnnot(annot);
                     FORM_OnBeforeClosePage(page, form);
-                    FPDFDOC_ExitFormFillEnvironment(form);
+                    _DocFormSeiteAb(df);
                     FPDF_ClosePage(page);
                     Tcl_SetObjResult(interp, Tcl_ObjPrintf(
                         "formfill: \"%s\" is a %s and takes a boolean,"
@@ -1427,6 +2098,7 @@ PdfiumFormFillCmd(ClientData cd, Tcl_Interp *interp,
                 unsigned short *pb = (unsigned short *)ckalloc(pl);
                 FPDFAnnot_GetFormFieldValue(form, annot, pb, pl);
                 Tcl_Obj *jetzt = _AnnotUtf16ToObj(interp, pb, pl);
+                Tcl_IncrRefCount(jetzt);
                 ckfree((char *)pb);
                 gleich = (strcmp(Tcl_GetString(jetzt),
                                  Tcl_GetString(wv[k+1])) == 0);
@@ -1471,8 +2143,109 @@ PdfiumFormFillCmd(ClientData cd, Tcl_Interp *interp,
         }
     }
 
+    /* DAS AUSSEHEN AUF DIE ANDEREN WIDGETS DESSELBEN FELDES.
+     *
+     * Ein Feld kann auf mehreren Seiten stehen -- der Durchschlagsatz
+     * eines Frachtbriefs. PDFium baut den Erscheinungsstrom nur fuer
+     * das Widget neu, an dem der Fokus war. Gemessen 07.09.2026:
+     * Vaterfeld mit /V(Muster), Widget 1 mit frischem Strom, Widget 2
+     * mit dem alten leeren -- und /NeedAppearances steht nicht da, also
+     * DARF ein Betrachter den alten nehmen. Auf dem Papier blieb Seite
+     * 2 leer.
+     *
+     * Weder ein Aufruf je Seite noch "flatten -forms" half: der Wert
+     * steht ja schon, es gibt fuer PDFium nichts neu zu bauen.
+     *
+     * Also wird der frische Strom KOPIERT. Nur bei gleicher GROESSE:
+     * der Strom ist auf die BBox seines Widgets gerechnet, und auf ein
+     * anders grosses Feld gelegt saesse der Text falsch. Verschiedene
+     * Groessen werden GEMELDET statt still uebergangen.
+     */
+    for (Tcl_Size wi = 0; wi < wc; wi += 2) {
+        const char *wn = Tcl_GetString(wv[wi]);
+        FPDF_ANNOTATION quelle = NULL;
+        FS_RECTF qr;
+        memset(&qr, 0, sizeof(qr));
+        int na = FPDFPage_GetAnnotCount(page);
+        /* Erst das gefuellte Widget auf DIESER Seite finden. */
+        for (int i = 0; i < na; i++) {
+            FPDF_ANNOTATION a = FPDFPage_GetAnnot(page, i);
+            if (!a) continue;
+            unsigned long nl = FPDFAnnot_GetFormFieldName(form, a, NULL, 0);
+            if (nl > 2) {
+                unsigned short *nb = (unsigned short *)ckalloc(nl);
+                FPDFAnnot_GetFormFieldName(form, a, nb, nl);
+                Tcl_Obj *nm = _AnnotUtf16ToObj(interp, nb, nl);
+                Tcl_IncrRefCount(nm);
+                ckfree((char *)nb);
+                if (strcmp(Tcl_GetString(nm), wn) == 0) {
+                    Tcl_DecrRefCount(nm);
+                    quelle = a;
+                    FPDFAnnot_GetRect(a, &qr);
+                    break;
+                }
+                Tcl_DecrRefCount(nm);
+            }
+            FPDFPage_CloseAnnot(a);
+        }
+        if (!quelle) continue;
+        unsigned long al = FPDFAnnot_GetAP(quelle, FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                           NULL, 0);
+        unsigned short *ab = NULL;
+        if (al > 2) {
+            ab = (unsigned short *)ckalloc(al);
+            FPDFAnnot_GetAP(quelle, FPDF_ANNOT_APPEARANCEMODE_NORMAL, ab, al);
+        }
+        FPDFPage_CloseAnnot(quelle);
+        if (!ab) continue;
+
+        int seiten = FPDF_GetPageCount(doc);
+        for (int sp = 0; sp < seiten; sp++) {
+            if (sp == pagenum) continue;
+            FPDF_PAGE ap = FPDF_LoadPage(doc, sp);
+            if (!ap) continue;
+            int an = FPDFPage_GetAnnotCount(ap);
+            for (int i = 0; i < an; i++) {
+                FPDF_ANNOTATION a = FPDFPage_GetAnnot(ap, i);
+                if (!a) continue;
+                unsigned long nl = FPDFAnnot_GetFormFieldName(form, a, NULL, 0);
+                int passt = 0;
+                if (nl > 2) {
+                    unsigned short *nb = (unsigned short *)ckalloc(nl);
+                    FPDFAnnot_GetFormFieldName(form, a, nb, nl);
+                    Tcl_Obj *nm = _AnnotUtf16ToObj(interp, nb, nl);
+                    Tcl_IncrRefCount(nm);
+                    ckfree((char *)nb);
+                    passt = (strcmp(Tcl_GetString(nm), wn) == 0);
+                    Tcl_DecrRefCount(nm);
+                }
+                if (passt) {
+                    FS_RECTF zr;
+                    if (FPDFAnnot_GetRect(a, &zr)) {
+                        double bq = qr.right - qr.left, hq = qr.top - qr.bottom;
+                        double bz = zr.right - zr.left, hz = zr.top - zr.bottom;
+                        if (fabs(bq - bz) < 0.01 && fabs(hq - hz) < 0.01) {
+                            FPDFAnnot_SetAP(a,
+                                    FPDF_ANNOT_APPEARANCEMODE_NORMAL,
+                                    (FPDF_WIDESTRING)ab);
+                        } else {
+                            Tcl_ListObjAppendElement(interp, fehlend,
+                                Tcl_ObjPrintf("%s (widget on page %d has a"
+                                    " different size; appearance not copied)",
+                                    wn, sp + 1));
+                        }
+                    }
+                }
+                FPDFPage_CloseAnnot(a);
+            }
+            FPDF_ClosePage(ap);
+        }
+        ckfree((char *)ab);
+    }
+
+    /* Nur die Seite abmelden -- die Umgebung gehoert dem Dokument. */
     FORM_OnBeforeClosePage(page, form);
-    FPDFDOC_ExitFormFillEnvironment(form);
+    _DocFormSeiteAb(df);
     FPDF_ClosePage(page);
 
     Tcl_Size nf;
@@ -2190,19 +2963,25 @@ PdfiumFlattenCmd(ClientData cd, Tcl_Interp *interp,
     if (!page) PDFIUM_ERROR(interp, "cannot load page");
 
     FPDF_FORMHANDLE form = NULL;
+    PdfiumDocForm *df = NULL;
     if (withForms) {
-        FPDF_FORMFILLINFO ffi;
-        memset(&ffi, 0, sizeof(ffi));
-        ffi.version = 1;
-        form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
-        if (form) FORM_OnAfterLoadPage(page, form);
+        df = _DocFormGet(doc, page, pagenum);
+        if (df) {
+            form = df->form;
+            FORM_OnAfterLoadPage(page, form);
+        }
     }
 
     int rc = FPDFPage_Flatten(page, flag);
 
     if (form) {
+        /* Nur die Seite abmelden -- die Umgebung gehoert dem Dokument. */
         FORM_OnBeforeClosePage(page, form);
-        FPDFDOC_ExitFormFillEnvironment(form);
+        if (df) {
+            /* Die Seite der Sitzung wieder eintragen, wenn es eine
+             * gibt -- sonst faende FFI_GetPage nichts mehr. */
+            _DocFormSeiteAb(df);
+        }
     }
     FPDF_ClosePage(page);
 
@@ -3106,10 +3885,172 @@ PdfiumBookmarksCmd(ClientData cd, Tcl_Interp *interp,
 }
 
 /* ------------------------------------------------------------------ */
-/* pdfium::formfields doc-handle pagenum                               */
-/* Gibt Liste von Dicts zurück:                                        */
-/*   {type name value}                                                 */
+/* pdfium::formcheck doc-handle ?pagenum?                              */
+/*                                                                     */
+/* Was an diesem Formular verdaechtig ist -- nicht, was drinsteht.     */
+/*                                                                     */
+/* AUSLESEN UND PRUEFEN SIND ZWEI SACHEN. "formfields" ist auf acht    */
+/* Elemente gewachsen, und jede weitere Auskunft macht es unleserlicher.*/
+/* Ein zweiter Befehl, der nur Befunde meldet, haelt beides klein.      */
+/*                                                                     */
+/* Rueckgabe: Liste von {code seite feld text}. LEER heisst: nichts    */
+/* aufgefallen -- und das soll man sehen koennen, statt es zu           */
+/* vermuten.                                                           */
+/*                                                                     */
+/* NUR BELEGTE CODES. Ein Entwurf vom 08.09.2026 nannte vierzehn; drei */
+/* davon haben an diesem Tag wirklich Zeit gekostet, die uebrigen elf  */
+/* waren gut begruendete Vermutungen. Ein Code, den nie eine echte      */
+/* Datei ausloest, wird nie rot -- und niemand erfaehrt, ob er richtig  */
+/* misst. Genau das ist mir an diesem Tag viermal mit eigenen Tests     */
+/* passiert.                                                           */
+/*                                                                     */
+/*   EMPTY_AP      Erscheinungsstrom der Laenge 0. PDFium zeichnet     */
+/*                 dann NICHTS -- gemessen. Ein LEERER Strom sagt "so  */
+/*                 sieht das Feld aus: gar nicht", und der Betrachter  */
+/*                 glaubt es.                                          */
+/*   VALUE_NO_AP   dasselbe, aber das Feld hat einen WERT. Das ist der */
+/*                 Fall "formfields nennt den Wert, im Betrachter      */
+/*                 sieht man nichts" -- er hat einen halben Tag        */
+/*                 gekostet.                                           */
+/*   CHOICE_VALUE_INVALID                                              */
+/*                 der Wert eines Auswahlfeldes steht nicht unter      */
+/*                 seinen Optionen.                                    */
+/*                                                                     */
+/* WAS HIER NICHT GEHT, und darum auch nicht behauptet wird: "kein /AP */
+/* vorhanden" ist von "leerer /AP" ueber diese Bindung NICHT zu        */
+/* unterscheiden. Fehlt der Strom ganz, baut PDFium sich selbst einen, */
+/* und die Laenge ist dann groesser null -- gemessen an einer Datei    */
+/* mit null /AP: apLength 75. Wer das trennen will, muss die Rohdatei  */
+/* lesen, und das waere eine zweite Wahrheitsquelle.                   */
 /* ------------------------------------------------------------------ */
+static int
+PdfiumFormCheckCmd(ClientData cd, Tcl_Interp *interp,
+                   int objc, Tcl_Obj *const objv[])
+{
+    (void)cd;
+    if (objc < 2 || objc > 3) {
+        Tcl_WrongNumArgs(interp, 1, objv, "doc-handle ?pagenum?");
+        return TCL_ERROR;
+    }
+    Tcl_WideInt ptr;
+    if (Tcl_GetWideIntFromObj(interp, objv[1], &ptr) != TCL_OK) return TCL_ERROR;
+    FPDF_DOCUMENT doc = (FPDF_DOCUMENT)(intptr_t)ptr;
+    int von = 0, bis = FPDF_GetPageCount(doc);
+    if (objc == 3) {
+        int p;
+        if (Tcl_GetIntFromObj(interp, objv[2], &p) != TCL_OK) return TCL_ERROR;
+        if (p < 0 || p >= bis) {
+            Tcl_SetObjResult(interp, Tcl_ObjPrintf(
+                "formcheck: page %d out of range (0..%d)", p, bis - 1));
+            return TCL_ERROR;
+        }
+        von = p; bis = p + 1;
+    }
+    Tcl_Obj *aus = Tcl_NewListObj(0, NULL);
+    for (int pn = von; pn < bis; pn++) {
+        FPDF_PAGE page = FPDF_LoadPage(doc, pn);
+        if (!page) continue;
+        PdfiumDocForm *df = _DocFormGet(doc, page, pn);
+        FPDF_FORMHANDLE form = df ? df->form : NULL;
+        if (form) FORM_OnAfterLoadPage(page, form);
+        int n = FPDFPage_GetAnnotCount(page);
+        for (int i = 0; i < n && form; i++) {
+            FPDF_ANNOTATION a = FPDFPage_GetAnnot(page, i);
+            if (!a) continue;
+            if (FPDFAnnot_GetSubtype(a) != FPDF_ANNOT_WIDGET) {
+                FPDFPage_CloseAnnot(a); continue;
+            }
+            /* Name */
+            Tcl_Obj *name = Tcl_NewStringObj("", 0);
+            Tcl_IncrRefCount(name);
+            unsigned long nl = FPDFAnnot_GetFormFieldName(form, a, NULL, 0);
+            if (nl > 2) {
+                unsigned short *nb = (unsigned short *)ckalloc(nl);
+                FPDFAnnot_GetFormFieldName(form, a, nb, nl);
+                Tcl_DecrRefCount(name);
+                name = _AnnotUtf16ToObj(interp, nb, nl);
+                Tcl_IncrRefCount(name);
+                ckfree((char *)nb);
+            }
+            /* Wert */
+            Tcl_Obj *wert = Tcl_NewStringObj("", 0);
+            Tcl_IncrRefCount(wert);
+            unsigned long vl = FPDFAnnot_GetFormFieldValue(form, a, NULL, 0);
+            if (vl > 2) {
+                unsigned short *vb = (unsigned short *)ckalloc(vl);
+                FPDFAnnot_GetFormFieldValue(form, a, vb, vl);
+                Tcl_DecrRefCount(wert);
+                wert = _AnnotUtf16ToObj(interp, vb, vl);
+                Tcl_IncrRefCount(wert);
+                ckfree((char *)vb);
+            }
+            const char *wstr = Tcl_GetString(wert);
+            int hatWert = (wstr[0] != '\0'
+                           && strcmp(wstr, "Off") != 0);
+            /* Erscheinungsstrom */
+            unsigned long apl = FPDFAnnot_GetAP(a,
+                    FPDF_ANNOT_APPEARANCEMODE_NORMAL, NULL, 0);
+            long ap = (apl > 2) ? (long)((apl - 2) / 2) : 0;
+
+#define FC_MELDE(code, txt) do {                                        \
+        Tcl_Obj *e = Tcl_NewListObj(0, NULL);                           \
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewStringObj(code, -1)); \
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewIntObj(pn));         \
+        Tcl_ListObjAppendElement(interp, e, Tcl_DuplicateObj(name));    \
+        Tcl_ListObjAppendElement(interp, e, Tcl_NewStringObj(txt, -1)); \
+        Tcl_ListObjAppendElement(interp, aus, e);                       \
+    } while (0)
+
+            if (ap == 0) {
+                if (hatWert) {
+                    FC_MELDE("VALUE_NO_AP",
+                        "field carries a value but its appearance stream is"
+                        " empty -- nothing will be drawn");
+                } else {
+                    FC_MELDE("EMPTY_AP",
+                        "appearance stream is empty -- the field draws"
+                        " nothing, not even its border");
+                }
+            }
+            /* Auswahlfeld: Wert unter den Optionen? */
+            int typ = FPDFAnnot_GetFormFieldType(form, a);
+            if (hatWert && (typ == FPDF_FORMFIELD_COMBOBOX
+                            || typ == FPDF_FORMFIELD_LISTBOX)) {
+                int oc = FPDFAnnot_GetOptionCount(form, a);
+                int gefunden = 0;
+                for (int o = 0; o < oc; o++) {
+                    unsigned long ll =
+                        FPDFAnnot_GetOptionLabel(form, a, o, NULL, 0);
+                    if (ll <= 2) continue;
+                    unsigned short *lb = (unsigned short *)ckalloc(ll);
+                    FPDFAnnot_GetOptionLabel(form, a, o, lb, ll);
+                    Tcl_Obj *lo = _AnnotUtf16ToObj(interp, lb, ll);
+                    Tcl_IncrRefCount(lo);
+                    ckfree((char *)lb);
+                    if (strcmp(Tcl_GetString(lo), wstr) == 0) gefunden = 1;
+                    Tcl_DecrRefCount(lo);
+                    if (gefunden) break;
+                }
+                if (oc > 0 && !gefunden) {
+                    FC_MELDE("CHOICE_VALUE_INVALID",
+                        "value is not among the field's options");
+                }
+            }
+#undef FC_MELDE
+            Tcl_DecrRefCount(name);
+            Tcl_DecrRefCount(wert);
+            FPDFPage_CloseAnnot(a);
+        }
+        if (form) {
+            FORM_OnBeforeClosePage(page, form);
+            _DocFormSeiteAb(df);
+        }
+        FPDF_ClosePage(page);
+    }
+    Tcl_SetObjResult(interp, aus);
+    return TCL_OK;
+}
+
 static int
 PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
                     int objc, Tcl_Obj *const objv[])
@@ -3149,10 +4090,8 @@ PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
      * FPDFAnnot_GetFormField* loest die Vererbung auf und setzt den
      * vollen Namen zusammen. Dafuer braucht es ein FPDF_FORMHANDLE.
      */
-    FPDF_FORMFILLINFO ffi;
-    memset(&ffi, 0, sizeof(ffi));
-    ffi.version = 1;
-    FPDF_FORMHANDLE form = FPDFDOC_InitFormFillEnvironment(doc, &ffi);
+    PdfiumDocForm *df = _DocFormGet(doc, page, pagenum);
+    FPDF_FORMHANDLE form = df ? df->form : NULL;
     if (form) FORM_OnAfterLoadPage(page, form);
 
     int n = FPDFPage_GetAnnotCount(page);
@@ -3281,6 +4220,7 @@ PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
          * Verdopplung sieht aus wie eine Erklaerung und ist keine.
          */
         Tcl_Obj *alt = Tcl_NewStringObj("", 0);
+        Tcl_IncrRefCount(alt);
         if (form) {
             unsigned long al =
                 FPDFAnnot_GetFormFieldAlternateName(form, annot, NULL, 0);
@@ -3294,14 +4234,41 @@ PdfiumFormFieldsCmd(ClientData cd, Tcl_Interp *interp,
         }
         Tcl_ListObjAppendElement(interp, entry, alt);
 
+        /* WIE LANG DER ERSCHEINUNGSSTROM IST.
+         *
+         * Der haeufigste Grund fuer "das Feld ist da und man sieht
+         * nichts": /V steht, /AP ist LEER. Die beiden sind in PDF
+         * getrennte Dinge (ISO 32000-1 12.5.5) -- formfields nennt den
+         * Wert, und PDFium zeichnet den Strom.
+         *
+         * Ohne diese Zahl sucht man den Fehler in der Bindung, im
+         * Renderweg oder in den Rueckrufen. Mit ihr sieht man sofort:
+         * die Datei sagt nicht, wie das Feld aussieht.
+         *
+         * 0 heisst LEER, nicht "nicht vorhanden" -- ein fehlendes /AP
+         * und ein leerer Strom sind fuer den Betrachter dasselbe, und
+         * eine Unterscheidung, die niemand nutzen kann, waere Ballast.
+         */
+        unsigned long apl = FPDFAnnot_GetAP(annot,
+                FPDF_ANNOT_APPEARANCEMODE_NORMAL, NULL, 0);
+        /* GetAP zaehlt in Bytes einschliesslich der abschliessenden
+         * Null; zwei Bytes sind die leere Zeichenkette. */
+        Tcl_ListObjAppendElement(interp, entry,
+                Tcl_NewWideIntObj(apl > 2 ? (Tcl_WideInt)(apl - 2) / 2 : 0));
+
         Tcl_ListObjAppendElement(interp, result, entry);
 
         FPDFPage_CloseAnnot(annot);
     }
 
     if (form) {
+        /* Nur die Seite abmelden -- die Umgebung gehoert dem Dokument. */
         FORM_OnBeforeClosePage(page, form);
-        FPDFDOC_ExitFormFillEnvironment(form);
+        if (df) {
+            /* Die Seite der Sitzung wieder eintragen, wenn es eine
+             * gibt -- sonst faende FFI_GetPage nichts mehr. */
+            _DocFormSeiteAb(df);
+        }
     }
     FPDF_ClosePage(page);
     Tcl_SetObjResult(interp, result);
@@ -4836,6 +5803,10 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumEditKeyCmd,       NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::editrender",
                          PdfiumEditRenderCmd,    NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::edittext",
+                         PdfiumEditTextCmd,      NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::editstate",
+                         PdfiumEditStateCmd,     NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::editend",
                          PdfiumEditEndCmd,       NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::formfill",
@@ -4860,6 +5831,8 @@ Pdfiumtcl_Init(Tcl_Interp *interp)
                          PdfiumStructureCmd,  NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::bookmarks",
                          PdfiumBookmarksCmd,  NULL, NULL);
+    Tcl_CreateObjCommand(interp, "::pdfium::formcheck",
+                         PdfiumFormCheckCmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::formfields",
                          PdfiumFormFieldsCmd, NULL, NULL);
     Tcl_CreateObjCommand(interp, "::pdfium::annot_list",
